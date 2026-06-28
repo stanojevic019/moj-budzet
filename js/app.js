@@ -12,6 +12,12 @@ let view = 'dashboard';
 let filterMonth = null;   // 'YYYY-MM' or null = all
 const charts = {};
 let pendingImports = [];   // parsed files awaiting confirmation
+let drillCat = null;       // category drill-down (id) or null
+let showFilters = false;   // advanced filter panel open
+let lockTimer = null;      // auto-lock timer
+let swReg = null;          // service-worker registration
+
+const todayISO = () => todayLocal();
 
 // ---------- formatting ----------
 const nf = (cur) => new Intl.NumberFormat('sr-RS', { style:'currency', currency:cur, maximumFractionDigits:0 });
@@ -22,8 +28,15 @@ function pct(n){ return (n>=0?'+':'') + (n==null?'–':n.toFixed(0)) + '%'; }
 const esc = (s) => (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const todayLocal = () => { const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); };
 
-function getEurRate(){ const r = db.get(`SELECT value FROM meta WHERE key='eur_rate'`); return r && +r.value>0 ? +r.value : 117.5; }
-function setEurRate(v){ db.run(`INSERT INTO meta(key,value) VALUES('eur_rate',?) ON CONFLICT(key) DO UPDATE SET value=?`, [String(v),String(v)]); }
+function getEurRate(){ const v = +db.getSetting('eur_rate', '117.5'); return v>0 ? v : 117.5; }
+function setEurRate(v){ db.setSetting('eur_rate', v); }
+const hideAmounts = () => db.getSetting('hide_amounts','0')==='1';
+const accent = () => db.getSetting('accent', '#3b82f6');
+const autolockMin = () => +db.getSetting('autolock_min','5');
+function applyPrefs(){
+  document.body.classList.toggle('hide-amounts', hideAmounts());
+  document.documentElement.style.setProperty('--accent', accent());
+}
 
 async function persist(){ await db.save(); }
 function toast(msg, ok=true){
@@ -34,6 +47,9 @@ function toast(msg, ok=true){
 
 // =================================================================== LOCK
 async function boot(){
+  registerSW();
+  app.addEventListener('click', onClick); // bound once (not per unlock)
+  ['click','keydown','touchstart','scroll'].forEach(ev=>document.addEventListener(ev, resetAutoLock, {passive:true}));
   const exists = await db.vaultExists();
   renderLock(exists);
 }
@@ -76,30 +92,38 @@ function renderLock(exists){
 
 // =================================================================== SHELL
 function enterApp(){
+  applyPrefs();
   app.innerHTML = `
     <header class="topbar">
       <div class="brand">💰 Moj Budžet</div>
-      <button class="lockbtn" data-action="lock" title="Zaključaj">🔒</button>
+      <div class="tb-actions">
+        <button class="iconbtn" data-action="toggle-hide" title="Sakrij/prikaži iznose">${hideAmounts()?'🙈':'👁️'}</button>
+        <button class="iconbtn" data-action="lock" title="Zaključaj">🔒</button>
+      </div>
     </header>
+    <div id="updateBanner" class="update-banner hidden">⬆️ Nova verzija je dostupna. <button data-action="do-update">Osveži</button></div>
     <main id="screen"></main>
+    <button class="fab" data-action="fab" title="Dodaj">＋</button>
     <nav class="tabbar">
       ${tab('dashboard','📊','Pregled')}
       ${tab('tx','🧾','Transakcije')}
-      ${tab('import','📥','Uvoz')}
+      ${tab('budgets','🎯','Budžeti')}
       ${tab('accounts','🏦','Računi')}
       ${tab('settings','⚙️','Više')}
     </nav>`;
-  app.addEventListener('click', onClick);
+  resetAutoLock();
   render();
 }
 const tab = (id,icon,label) => `<button class="tab ${view===id?'active':''}" data-tab="${id}"><span>${icon}</span>${label}</button>`;
 
 function render(){
   app.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===view));
+  const fab = $('.fab'); if(fab) fab.style.display = view==='import' ? 'none' : '';
   const s = $('#screen'); if(!s) return;
   Object.values(charts).forEach(c=>{ try{c.destroy();}catch{} });
   if(view==='dashboard') renderDashboard(s);
   else if(view==='tx') renderTx(s);
+  else if(view==='budgets') renderBudgets(s);
   else if(view==='import') renderImport(s);
   else if(view==='accounts') renderAccounts(s);
   else if(view==='settings') renderSettings(s);
@@ -122,6 +146,14 @@ function renderDashboard(s){
   const rec = an.recurring(rate);
   const recMonthly = rec.reduce((s,r)=>s+r.median,0);
   const runway = k.avgSpend ? nw.totalRSD / k.avgSpend : 0;
+  const nws = an.netWorthSeries(rate);
+  const nwTrend = nws.length>1 ? nws[nws.length-1].net - nws[nws.length-2].net : 0;
+  const ww = an.needsWants(k.current.month, rate);
+  const proj = an.projection(k.current.month, rate, todayISO());
+  const budgets = an.budgetStatus(k.current.month, rate);
+  const overBudget = budgets.filter(b=>b.over);
+  const movers = an.categoryMovers(k.current.month, k.prev?k.prev.month:null, rate)
+    .filter(x=>Math.abs(x.delta)>500).slice(0,5);
 
   s.innerHTML = `
     <div class="kpis">
@@ -131,11 +163,30 @@ function renderDashboard(s){
       ${kpi('Prosečna potrošnja', fmt(k.avgSpend), `${k.monthsCount} mes. · rezerva ~${runway.toFixed(1)} mes.`, '')}
     </div>
 
-    ${insights(k, breakdown, recMonthly)}
+    ${insights(k, breakdown, recMonthly, proj)}
+
+    ${budgets.length ? `<section class="card" data-action="goto" data-view="budgets" style="cursor:pointer">
+      <div class="row-between"><h3>🎯 Budžeti · ${k.current.label}</h3><small>${overBudget.length?`<span class="neg">${overBudget.length} prekoračeno</span>`:'sve u okviru ✓'}</small></div>
+      ${budgets.slice(0,4).map(b=>budgetBar(b)).join('')}
+      <div class="muted small" style="margin-top:6px">Dodirni za sve budžete →</div>
+    </section>`:''}
+
+    <section class="card">
+      <h3>Pravilo 50/30/20 · ${k.current.label}</h3>
+      ${ratioBar('Potrebe', ww.needs, k.current.realIncome, 50, '#22c55e')}
+      ${ratioBar('Želje', ww.wants, k.current.realIncome, 30, '#f59e0b')}
+      ${ratioBar('Štednja', Math.max(0,k.current.net), k.current.realIncome, 20, '#3b82f6')}
+      <div class="muted small" style="margin-top:6px">Cilj: 50% potrebe · 30% želje · 20% štednja (od prihoda ${fmt(k.current.realIncome)})</div>
+    </section>
 
     <section class="card">
       <h3>Prihodi vs rashodi po mesecima</h3>
       <div class="chart-wrap"><canvas id="cIE"></canvas></div>
+    </section>
+
+    <section class="card">
+      <h3>Neto vrednost kroz vreme ${nwTrend>=0?'<span class="pos">📈</span>':'<span class="neg">📉</span>'}</h3>
+      <div class="chart-wrap"><canvas id="cNW"></canvas></div>
     </section>
 
     <section class="card">
@@ -147,9 +198,16 @@ function renderDashboard(s){
       <div class="row-between"><h3>Rashodi po kategorijama · ${k.current.label}</h3></div>
       <div class="chart-wrap small"><canvas id="cCat"></canvas></div>
       <div class="cat-legend">
-        ${breakdown.map(c=>`<div class="cl"><span class="dot" style="background:${c.color}"></span>${c.icon} ${esc(c.name)}<b>${fmt(c.total)}</b></div>`).join('')}
+        ${breakdown.map(c=>`<div class="cl" data-action="drill" data-cat="${c.id}"><span class="dot" style="background:${c.color}"></span>${c.icon} ${esc(c.name)}<b>${fmt(c.total)}</b></div>`).join('')}
       </div>
+      <div class="muted small">Dodirni kategoriju za detalje →</div>
     </section>
+
+    ${movers.length ? `<section class="card">
+      <h3>Najveće promene vs ${k.prev?k.prev.label:'prošli mesec'}</h3>
+      ${movers.map(x=>`<div class="rec-row" data-action="drill" data-cat="${x.cat.id||''}"><div>${x.cat.icon} ${esc(x.cat.name)}</div>
+        <b class="${x.delta>0?'neg':'pos'}">${x.delta>0?'▲':'▼'} ${fmtN(Math.abs(x.delta))}</b></div>`).join('')}
+    </section>`:''}
 
     <section class="card">
       <h3>Računi</h3>
@@ -179,10 +237,35 @@ function renderDashboard(s){
   charts.cat = new C($('#cCat'), { type:'doughnut', data:{ labels:breakdown.map(c=>c.name),
     datasets:[{ data:breakdown.map(c=>c.total), backgroundColor:breakdown.map(c=>c.color) }] },
     options:{ plugins:{ legend:{display:false} }, cutout:'60%' } });
+
+  charts.nw = new C($('#cNW'), { type:'line', data:{ labels:nws.map(x=>x.label), datasets:[
+    { label:'Neto vrednost', data:nws.map(x=>x.net), borderColor:accent(), backgroundColor:'rgba(59,130,246,.12)', fill:true, tension:.3 },
+  ]}, options: barOpts() });
 }
 
-function insights(k, breakdown, recMonthly){
+// progress bar for a budget row
+function budgetBar(b){
+  const p = Math.min(100, b.pct);
+  const col = b.pct>=100?'#ef4444':(b.pct>=80?'#eab308':'#22c55e');
+  return `<div class="bbar"><div class="bbar-top"><span>${b.icon} ${esc(b.name)}</span>
+    <span class="${b.over?'neg':''}">${fmt(b.spent)} / ${fmt(b.amount)}</span></div>
+    <div class="bbar-track"><div class="bbar-fill" style="width:${p}%;background:${col}"></div></div></div>`;
+}
+// 50/30/20 ratio bar: actual vs target % of income
+function ratioBar(label, value, income, targetPct, color){
+  const actualPct = income>0 ? value/income*100 : 0;
+  const w = Math.min(100, actualPct);
+  return `<div class="bbar"><div class="bbar-top"><span>${label}</span>
+    <span>${actualPct.toFixed(0)}% <small>(cilj ${targetPct}%)</small> · ${fmt(value)}</span></div>
+    <div class="bbar-track"><div class="bbar-fill" style="width:${w}%;background:${color}"></div>
+      <div class="bbar-target" style="left:${targetPct}%"></div></div></div>`;
+}
+
+function insights(k, breakdown, recMonthly, proj){
   const tips = [];
+  if(proj && proj.day>=2){
+    tips.push(`📅 Tempom od ${fmt(proj.spent)} za ${proj.day}. dana, do kraja meseca projektovano je <b>${fmt(proj.projected)}</b>.`);
+  }
   if(k.savingsRate!=null){
     if(k.savingsRate>=20) tips.push(`✅ Odlična stopa štednje (<b>${k.savingsRate.toFixed(0)}%</b>) ovog meseca. Ekonomska preporuka je 20%+.`);
     else if(k.savingsRate>=0) tips.push(`🟡 Štednja ovog meseca je <b>${k.savingsRate.toFixed(0)}%</b>. Cilj 20% — ima prostora.`);
@@ -205,35 +288,67 @@ function barOpts(){ return { responsive:true, maintainAspectRatio:false,
   scales:{ y:{ ticks:{ callback:v=>fmtN(v) } }, x:{ ticks:{ font:{size:10} } } } }; }
 
 // =================================================================== TRANSACTIONS
-function renderTx(s){
-  const accounts = repo.getAccounts();
-  const cats = repo.getCategories();
-  const months = an.monthly(getEurRate()).map(x=>x.month).reverse();
-  const acctMap = Object.fromEntries(accounts.map(a=>[a.id,a]));
-  const catMapById = Object.fromEntries(cats.map(c=>[c.id,c]));
-  let where = []; let params=[];
+const txFilter = { account:null, category:null, q:null, from:null, to:null, min:null, max:null, type:null };
+function activeFilterCount(){ return ['account','category','q','from','to','min','max','type'].filter(k=>txFilter[k]).length + (filterMonth?1:0); }
+function clearFilters(){ Object.keys(txFilter).forEach(k=>txFilter[k]=null); filterMonth=null; drillCat=null; }
+
+function buildTxWhere(){
+  const where=[], params=[];
   if(filterMonth){ where.push(`substr(date,1,7)=?`); params.push(filterMonth); }
   if(txFilter.account){ where.push(`account_id=?`); params.push(txFilter.account); }
   if(txFilter.category){ where.push(`category_id=?`); params.push(txFilter.category); }
-  if(txFilter.q){ where.push(`(UPPER(merchant) LIKE ? OR UPPER(description) LIKE ?)`); const q='%'+txFilter.q.toUpperCase()+'%'; params.push(q,q); }
-  const whereSql = where.length?'WHERE '+where.join(' AND '):'';
+  if(txFilter.from){ where.push(`date>=?`); params.push(txFilter.from); }
+  if(txFilter.to){ where.push(`date<=?`); params.push(txFilter.to); }
+  if(txFilter.type==='income') where.push(`amount>0`);
+  if(txFilter.type==='expense') where.push(`amount<0`);
+  if(txFilter.min){ where.push(`ABS(amount)>=?`); params.push(+txFilter.min); }
+  if(txFilter.max){ where.push(`ABS(amount)<=?`); params.push(+txFilter.max); }
+  if(txFilter.q){ where.push(`(UPPER(merchant) LIKE ? OR UPPER(description) LIKE ? OR UPPER(counterparty) LIKE ?)`);
+    const q='%'+txFilter.q.toUpperCase()+'%'; params.push(q,q,q); }
+  return { whereSql: where.length?'WHERE '+where.join(' AND '):'', params };
+}
+
+function renderTx(s){
+  const rate=getEurRate();
+  const accounts = repo.getAccounts();
+  const cats = repo.getCategories();
+  const months = an.monthly(rate).map(x=>x.month).reverse();
+  const acctMap = Object.fromEntries(accounts.map(a=>[a.id,a]));
+  const catMapById = Object.fromEntries(cats.map(c=>[c.id,c]));
+  const { whereSql, params } = buildTxWhere();
   const rows = db.all(`SELECT * FROM transactions ${whereSql} ORDER BY date DESC, id DESC LIMIT 500`, params);
-  // Summary over the FULL filtered set (not the 500-row page), all in RSD base.
-  const conv = `(CASE currency WHEN 'EUR' THEN ${getEurRate()} ELSE 1 END)`;
+  const conv = `(CASE currency WHEN 'EUR' THEN ${rate} ELSE 1 END)`;
   const agg = db.get(`SELECT COUNT(*) AS n,
      COALESCE(SUM(CASE WHEN amount>0 THEN amount*${conv} ELSE 0 END),0) AS inc,
      COALESCE(SUM(CASE WHEN amount<0 THEN -amount*${conv} ELSE 0 END),0) AS out
      FROM transactions ${whereSql}`, params);
   const sumIn = agg.inc, sumOut = agg.out, totalN = agg.n;
+  const drill = txFilter.category ? catMapById[txFilter.category] : null;
 
   s.innerHTML = `
+    ${drill ? `<section class="card drill">
+      <div class="row-between"><h3>${drill.icon} ${esc(drill.name)}</h3><button class="ghost sm" data-action="clear-filters">✕ očisti</button></div>
+      <div class="chart-wrap small"><canvas id="cDrill"></canvas></div>
+    </section>`:''}
     <div class="toolbar">
-      <button class="primary" data-action="add-manual">＋ Dodaj</button>
       <select data-filter="month"><option value="">Svi meseci</option>${months.map(mm=>`<option value="${mm}" ${filterMonth===mm?'selected':''}>${an.fmtMonth(mm)}</option>`).join('')}</select>
       <select data-filter="account"><option value="">Svi računi</option>${accounts.map(a=>`<option value="${a.id}" ${txFilter.account==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select>
       <select data-filter="category"><option value="">Sve kategorije</option>${cats.map(c=>`<option value="${c.id}" ${txFilter.category==c.id?'selected':''}>${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
       <input data-filter="q" placeholder="🔎 Traži…" value="${esc(txFilter.q||'')}" />
+      <button class="ghost filt-toggle" data-action="toggle-filters">⚙︎ Filteri${activeFilterCount()?` (${activeFilterCount()})`:''}</button>
     </div>
+    ${showFilters?`<section class="card filters">
+      <div class="seg type-seg">
+        <button class="seg-b ${!txFilter.type?'active':''}" data-type="">Sve</button>
+        <button class="seg-b ${txFilter.type==='expense'?'active':''}" data-type="expense">Rashodi</button>
+        <button class="seg-b ${txFilter.type==='income'?'active':''}" data-type="income">Prihodi</button>
+      </div>
+      <div class="form-row"><label class="fld">Od<input type="date" data-filter="from" value="${txFilter.from||''}"></label>
+        <label class="fld">Do<input type="date" data-filter="to" value="${txFilter.to||''}"></label></div>
+      <div class="form-row"><label class="fld">Min iznos<input type="number" data-filter="min" value="${txFilter.min||''}"></label>
+        <label class="fld">Max iznos<input type="number" data-filter="max" value="${txFilter.max||''}"></label></div>
+      <button class="ghost" data-action="clear-filters">Očisti sve filtere</button>
+    </section>`:''}
     <div class="tx-summary"><span>${totalN>rows.length?`${rows.length} od ${totalN}`:`${totalN} transakcija`}</span><span class="pos">+${fmtN(sumIn)}</span><span class="neg">−${fmtN(sumOut)}</span></div>
     <div class="tx-list">
       ${rows.map(r=>{
@@ -248,13 +363,52 @@ function renderTx(s){
         </div>`;
       }).join('') || empty('🧾','Nema transakcija','Promeni filtere ili dodaj/uvezi podatke.')}
     </div>`;
+
   s.querySelectorAll('[data-filter]').forEach(elm=> elm.addEventListener('change', e=>{
     const f=e.target.dataset.filter, v=e.target.value;
     if(f==='month') filterMonth=v||null; else txFilter[f]=v||null; render();
   }));
   const q=$('[data-filter="q"]',s); if(q) q.addEventListener('input', debounce(e=>{ txFilter.q=e.target.value||null; render(); },300));
+  s.querySelectorAll('[data-type]').forEach(b=> b.addEventListener('click', ()=>{ txFilter.type=b.dataset.type||null; render(); }));
+
+  if(drill){
+    const hist = an.categoryHistory(drill.id, rate);
+    charts.drill = new window.Chart($('#cDrill'), { type:'bar', data:{ labels:hist.map(h=>h.label),
+      datasets:[{ label:drill.name, data:hist.map(h=>h.total), backgroundColor:drill.color }] }, options: barOpts() });
+  }
 }
-const txFilter = { account:null, category:null, q:null };
+
+// =================================================================== BUDGETS
+function renderBudgets(s){
+  const rate=getEurRate();
+  const m = an.monthly(rate);
+  if(!m.length){ s.innerHTML = empty('🎯','Još nema podataka','Uvezi ili dodaj transakcije pa postavi mesečne budžete.','Dodaj/Uvezi','tx'); return; }
+  const monthsList = m.map(x=>x.month).reverse();
+  const month = (filterMonth && monthsList.includes(filterMonth)) ? filterMonth : monthsList[0];
+  const status = an.budgetStatus(month, rate);
+  const cats = repo.getCategories().filter(c=>c.kind==='expense');
+  const totalBudget = status.reduce((a,b)=>a+b.amount,0);
+  const totalSpent = status.reduce((a,b)=>a+b.spent,0);
+  s.innerHTML = `
+    <div class="toolbar2">
+      <select data-bmonth>${monthsList.map(mm=>`<option value="${mm}" ${mm===month?'selected':''}>${an.fmtMonth(mm)}</option>`).join('')}</select>
+    </div>
+    ${status.length?`<section class="card">
+      <div class="row-between"><h3>Ukupno · ${an.fmtMonth(month)}</h3><b class="${totalSpent>totalBudget?'neg':''}">${fmt(totalSpent)} / ${fmt(totalBudget)}</b></div>
+      ${status.map(b=>`<div data-action="drill" data-cat="${b.category_id}" style="cursor:pointer">${budgetBar(b)}</div>`).join('')}
+    </section>`:`<div class="empty"><div class="ei">🎯</div><h3>Postavi prve budžete</h3><p>Unesi mesečni limit za kategorije ispod — pratićeš napredak i upozorenja.</p></div>`}
+    <section class="card">
+      <h3>Mesečni limiti po kategoriji</h3>
+      <p class="muted small">Ostavi prazno da ukloniš budžet.</p>
+      ${cats.map(c=>{ const b=status.find(x=>x.category_id===c.id);
+        return `<div class="brow"><span>${c.icon} ${esc(c.name)}</span>
+          <input type="number" inputmode="numeric" class="binput" data-budget="${c.id}" placeholder="—" value="${b?Math.round(b.amount):''}"></div>`; }).join('')}
+    </section>`;
+  $('[data-bmonth]',s)?.addEventListener('change', e=>{ filterMonth=e.target.value; render(); });
+  s.querySelectorAll('[data-budget]').forEach(inp=> inp.addEventListener('change', async e=>{
+    repo.setBudget(+e.target.dataset.budget, parseFloat(e.target.value)||0); await persist(); toast('Budžet sačuvan.'); render();
+  }));
+}
 
 // =================================================================== IMPORT
 function renderImport(s){
@@ -352,21 +506,35 @@ function renderAccounts(s){
 }
 
 // =================================================================== SETTINGS
+const ACCENTS = ['#3b82f6','#22c55e','#8b5cf6','#f97316','#ec4899','#14b8a6'];
 function renderSettings(s){
   const cats = repo.getCategories();
   const rules = db.all(`SELECT r.*, c.name AS cat, c.icon FROM rules r JOIN categories c ON c.id=r.category_id ORDER BY r.priority, r.match`);
+  const al = autolockMin();
   s.innerHTML = `
     <section class="card">
+      <h3>📥 Uvoz izvoda</h3>
+      <p class="muted small">Uvezi PDF izvode (Banca Intesa). Duplikati se preskaču.</p>
+      <button class="primary big" data-action="goto" data-view="import">Uvezi PDF izvod</button>
+    </section>
+    <section class="card">
       <h3>Izvoz podataka</h3>
-      <p class="muted">Sigurnosna kopija ili dalja analiza u Excelu.</p>
       <div class="form-row">
         <button data-action="export-xlsx">📊 Excel (.xlsx)</button>
         <button data-action="export-csv">📄 CSV</button>
       </div>
     </section>
     <section class="card">
+      <h3>Kategorije <small>${cats.length}</small></h3>
+      <p class="muted small">Dodirni kategoriju za izmenu (ime, boja, grupa) ili brisanje.</p>
+      <div class="cat-grid">
+        ${cats.map(c=>`<button class="catchip" data-action="edit-category" data-id="${c.id}" style="border-color:${c.color}">${c.icon} ${esc(c.name)}</button>`).join('')}
+      </div>
+      <button data-action="add-category">＋ Nova kategorija</button>
+    </section>
+    <section class="card">
       <h3>Pravila kategorizacije <small>${rules.length}</small></h3>
-      <p class="muted">Ako opis/trgovac sadrži tekst → dodeli kategoriju. Manji prioritet = proverava se prvo.</p>
+      <p class="muted small">Ako opis/trgovac sadrži tekst → dodeli kategoriju.</p>
       <div class="form-row">
         <input id="rMatch" placeholder="Tekst (npr. LIDL)" />
         <select id="rCat">${cats.map(c=>`<option value="${c.id}">${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
@@ -378,16 +546,26 @@ function renderSettings(s){
       </div>
     </section>
     <section class="card">
-      <h3>Sigurnost</h3>
+      <h3>Izgled</h3>
+      <div class="muted small">Akcenat boja</div>
+      <div class="accent-row">${ACCENTS.map(c=>`<button class="accent-dot ${accent()===c?'sel':''}" data-action="set-accent" data-color="${c}" style="background:${c}"></button>`).join('')}</div>
+    </section>
+    <section class="card">
+      <h3>🔒 Sigurnost</h3>
+      <div class="muted small">Automatsko zaključavanje pri neaktivnosti</div>
+      <select id="autolock">
+        ${[['0','Isključeno'],['1','1 minut'],['5','5 minuta'],['15','15 minuta'],['30','30 minuta']].map(([v,l])=>`<option value="${v}" ${al==+v?'selected':''}>${l}</option>`).join('')}
+      </select>
+      <div class="muted small" style="margin-top:10px">Promena lozinke</div>
       <input type="password" id="np1" placeholder="Nova lozinka" />
       <input type="password" id="np2" placeholder="Ponovi novu lozinku" />
       <button data-action="change-pass">Promeni lozinku</button>
       <button class="ghost" data-action="lock">🔒 Zaključaj sada</button>
     </section>
     <section class="card muted small">
-      Moj Budžet · podaci su šifrovani (AES-256-GCM) i čuvaju se samo na ovom uređaju.
-      Aplikacija nema vezu sa internetom ni sa bankama.
+      Moj Budžet · podaci su šifrovani (AES-256-GCM, PBKDF2 ${(600000).toLocaleString('sr-RS')} iteracija) i čuvaju se samo na ovom uređaju. Bez interneta i bez bankarske veze.
     </section>`;
+  $('#autolock',s)?.addEventListener('change', async e=>{ db.setSetting('autolock_min', +e.target.value); await persist(); resetAutoLock(); toast('Sačuvano.'); });
 }
 
 // =================================================================== EXPORT
@@ -464,15 +642,95 @@ function editCatModal(txId){
   m.querySelector('.del-tx').onclick = async ()=>{ if(confirm('Obrisati transakciju?')){ repo.deleteTransaction(txId); await persist(); m.remove(); render(); } };
 }
 
+// FAB quick-action sheet
+function fabSheet(){
+  const m = modal(`<h3>Dodaj</h3>
+    <button class="primary big" id="fbTx">＋ Nova transakcija</button>
+    <button class="big" id="fbImp" style="margin-top:8px">📥 Uvezi PDF izvod</button>
+    <button class="ghost" data-close style="width:100%;margin-top:8px">Otkaži</button>`);
+  m.querySelector('[data-close]').onclick=()=>m.remove();
+  m.querySelector('#fbTx').onclick=()=>{ m.remove(); addManualModal(); };
+  m.querySelector('#fbImp').onclick=()=>{ m.remove(); view='import'; render(); };
+}
+const CAT_COLORS=['#22c55e','#f97316','#eab308','#ef4444','#ec4899','#8b5cf6','#0ea5e9','#14b8a6','#f43f5e','#06b6d4','#64748b','#3b82f6'];
+function categoryEditModal(id){
+  const c = db.get(`SELECT * FROM categories WHERE id=?`,[id]); if(!c) return;
+  const m = modal(`<h3>Izmena kategorije</h3>
+    <div class="form-row"><input id="ceIcon" value="${esc(c.icon||'')}" placeholder="🏷️" style="flex:0 0 64px;text-align:center" />
+      <input id="ceName" value="${esc(c.name)}" placeholder="Naziv" /></div>
+    <select id="ceGrp"><option value="">— grupa (50/30/20) —</option>
+      <option value="needs" ${c.grp==='needs'?'selected':''}>Potrebe</option>
+      <option value="wants" ${c.grp==='wants'?'selected':''}>Želje</option></select>
+    <div class="muted small" style="margin-top:8px">Boja</div>
+    <div class="accent-row">${CAT_COLORS.map(col=>`<button class="accent-dot ${c.color===col?'sel':''}" data-col="${col}" style="background:${col}"></button>`).join('')}</div>
+    <div class="form-row" style="margin-top:10px"><button class="ghost" data-close>Otkaži</button><button class="primary" id="ceSave">Sačuvaj</button></div>
+    <button class="del-tx" id="ceDel" style="width:100%;margin-top:8px">🗑 Obriši kategoriju</button>`);
+  let color=c.color;
+  m.querySelectorAll('[data-col]').forEach(b=>b.onclick=()=>{ color=b.dataset.col; m.querySelectorAll('[data-col]').forEach(x=>x.classList.toggle('sel',x===b)); });
+  m.querySelector('[data-close]').onclick=()=>m.remove();
+  m.querySelector('#ceSave').onclick=async()=>{ const name=m.querySelector('#ceName').value.trim(); if(!name) return;
+    repo.updateCategory(id,{ name, icon:m.querySelector('#ceIcon').value.trim()||'🏷️', color, grp:m.querySelector('#ceGrp').value||null });
+    await persist(); m.remove(); toast('Kategorija sačuvana.'); render(); };
+  m.querySelector('#ceDel').onclick=async()=>{ if(confirm('Obrisati kategoriju? Njene transakcije se premeštaju u „Ostalo / Nekategorisano".')){
+    if(repo.deleteCategory(id)){ await persist(); m.remove(); toast('Kategorija obrisana.'); render(); } else toast('Ova kategorija se ne može obrisati.',false); } };
+}
+function categoryAddModal(){
+  const m = modal(`<h3>Nova kategorija</h3>
+    <div class="form-row"><input id="caIcon" value="🏷️" style="flex:0 0 64px;text-align:center" /><input id="caName" placeholder="Naziv" /></div>
+    <div class="form-row"><select id="caKind"><option value="expense">Rashod</option><option value="income">Prihod</option></select>
+      <select id="caGrp"><option value="">— grupa —</option><option value="needs">Potrebe</option><option value="wants">Želje</option></select></div>
+    <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="primary" id="caSave">Dodaj</button></div>`);
+  m.querySelector('[data-close]').onclick=()=>m.remove();
+  m.querySelector('#caSave').onclick=async()=>{ const name=m.querySelector('#caName').value.trim(); if(!name) return;
+    repo.addCategory({ name, kind:m.querySelector('#caKind').value, icon:m.querySelector('#caIcon').value.trim()||'🏷️', grp:m.querySelector('#caGrp').value||null, color:'#6b7280' });
+    await persist(); m.remove(); toast('Kategorija dodata.'); render(); };
+}
+
+// ---------- auto-lock ----------
+function resetAutoLock(){
+  if(lockTimer){ clearTimeout(lockTimer); lockTimer=null; }
+  if(!db.isOpen()) return;
+  const min = autolockMin();
+  if(min>0) lockTimer = setTimeout(()=>{ lockTimer=null; db.lock(); renderLock(true); }, min*60000);
+}
+
+// ---------- service-worker auto-update ----------
+async function registerSW(){
+  if(!('serviceWorker' in navigator)) return;
+  try {
+    swReg = await navigator.serviceWorker.register('sw.js');
+    swReg.addEventListener('updatefound', ()=>{
+      const nw = swReg.installing;
+      if(nw) nw.addEventListener('statechange', ()=>{
+        if(nw.state==='installed' && navigator.serviceWorker.controller) { const b=$('#updateBanner'); if(b) b.classList.remove('hidden'); }
+      });
+    });
+    let reloaded=false;
+    navigator.serviceWorker.addEventListener('controllerchange', ()=>{ if(reloaded) return; reloaded=true; location.reload(); });
+    setInterval(()=>swReg && swReg.update().catch(()=>{}), 60000);
+  } catch {}
+}
+function doUpdate(){ if(swReg && swReg.waiting) swReg.waiting.postMessage('skipWaiting'); else location.reload(); }
+
 // =================================================================== EVENTS
 async function onClick(e){
-  const tabBtn = e.target.closest('.tab'); if(tabBtn){ view=tabBtn.dataset.tab; render(); return; }
+  resetAutoLock();
+  const tabBtn = e.target.closest('.tab'); if(tabBtn){ if(view!==tabBtn.dataset.tab){ drillCat=null; } view=tabBtn.dataset.tab; render(); return; }
   const a = e.target.closest('[data-action]'); if(!a) return;
   const act = a.dataset.action;
   if(act==='lock'){ db.lock(); location.reload(); }
   else if(act==='goto'){ view=a.dataset.view; render(); }
+  else if(act==='fab'){ fabSheet(); }
   else if(act==='add-manual'){ addManualModal(); }
   else if(act==='edit-cat'){ editCatModal(+a.dataset.txid); }
+  else if(act==='toggle-hide'){ db.setSetting('hide_amounts', hideAmounts()?'0':'1'); await persist(); applyPrefs(); const btn=$('[data-action="toggle-hide"]'); if(btn) btn.textContent=hideAmounts()?'🙈':'👁️'; }
+  else if(act==='drill'){ if(a.dataset.cat){ txFilter.category=+a.dataset.cat; view='tx'; render(); } }
+  else if(act==='toggle-filters'){ showFilters=!showFilters; render(); }
+  else if(act==='clear-filters'){ clearFilters(); showFilters=false; render(); }
+  else if(act==='edit-category'){ categoryEditModal(+a.dataset.id); }
+  else if(act==='add-category'){ categoryAddModal(); }
+  else if(act==='set-accent'){ db.setSetting('accent', a.dataset.color); await persist(); applyPrefs(); render(); }
+  else if(act==='do-update'){ doUpdate(); }
   else if(act==='confirm-import'){ a.disabled=true; a.textContent='Uvozim…'; await confirmImport(); }
   else if(act==='add-account'){
     const name=$('#naName').value.trim(); if(!name) return;

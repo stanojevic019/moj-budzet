@@ -112,4 +112,74 @@ export function kpis(eurRate=117.5){
   return { current:cur, prev, avgSpend, avgInc, totalSaved, top, momSpend, savingsRate, avgSavingsRate, monthsCount:m.length };
 }
 
+// ---------- budgets ----------
+// Spending vs monthly budget for a given month. Returns rows sorted worst-first.
+export function budgetStatus(month, eurRate=117.5){
+  const budgets = db.all(`SELECT b.category_id, b.amount, c.name, c.icon, c.color FROM budgets b JOIN categories c ON c.id=b.category_id`);
+  const rows = budgets.map(b=>{
+    const r = db.get(`SELECT COALESCE(SUM(ABS(amount)*(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)),0) AS spent
+      FROM transactions WHERE category_id=? AND amount<0 AND substr(date,1,7)=?`, [eurRate, b.category_id, month]);
+    const spent=r.spent, pct=b.amount? spent/b.amount*100 : 0;
+    return {...b, spent, pct, remaining:b.amount-spent, over:spent>b.amount};
+  });
+  return rows.sort((a,b)=>b.pct-a.pct);
+}
+
+// ---------- 50/30/20 (needs / wants / savings) ----------
+export function needsWants(month, eurRate=117.5){
+  const rows = db.all(`SELECT c.grp AS grp, SUM(ABS(t.amount)*(CASE t.currency WHEN 'EUR' THEN ? ELSE 1 END)) AS tot
+    FROM transactions t JOIN categories c ON c.id=t.category_id
+    WHERE t.amount<0 AND substr(t.date,1,7)=? GROUP BY c.grp`, [eurRate, month]);
+  let needs=0, wants=0;
+  for(const r of rows){ if(r.grp==='needs') needs=r.tot; else if(r.grp==='wants') wants=r.tot; }
+  return { needs, wants };
+}
+
+// ---------- projection: extrapolate this month's spending to month end ----------
+export function projection(month, eurRate, todayISO){
+  // only meaningful when `month` is the month that contains todayISO
+  if(!todayISO || todayISO.slice(0,7)!==month) return null;
+  const [y,m] = month.split('-').map(Number);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const day = Number(todayISO.slice(8,10));
+  const r = db.get(`SELECT COALESCE(SUM(ABS(amount)*(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)),0) AS s
+    FROM transactions WHERE amount<0 AND substr(date,1,7)=?`, [eurRate, month]);
+  const spent=r.s; if(day<1) return null;
+  return { spent, projected: spent/day*daysInMonth, day, daysInMonth };
+}
+
+// ---------- net-worth over time (per-account, all currencies → RSD) ----------
+export function netWorthSeries(eurRate=117.5){
+  const accts = db.all(`SELECT id, currency, opening_balance FROM accounts WHERE archived=0`);
+  const months = db.all(`SELECT DISTINCT substr(date,1,7) AS m FROM transactions ORDER BY m`).map(r=>r.m);
+  return months.map(m=>{
+    let total=0;
+    for(const a of accts){
+      const r = db.get(`SELECT COALESCE(SUM(amount),0) AS s FROM transactions WHERE account_id=? AND substr(date,1,7)<=?`, [a.id, m]);
+      const bal = a.opening_balance + r.s;
+      total += a.currency==='EUR' ? bal*eurRate : bal;
+    }
+    return { month:m, label:fmtMonth(m), net: total };
+  });
+}
+
+// ---------- biggest category movers (cur vs prev month) ----------
+export function categoryMovers(curMonth, prevMonth, eurRate=117.5){
+  const cats = catLookup();
+  const q = (mo)=>{ const rows=db.all(`SELECT category_id, SUM(ABS(amount)*(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)) AS t
+      FROM transactions WHERE amount<0 AND substr(date,1,7)=? GROUP BY category_id`, [eurRate, mo]);
+    const map={}; rows.forEach(r=>map[r.category_id]=r.t); return map; };
+  const cur=q(curMonth), prev=prevMonth?q(prevMonth):{};
+  const ids=new Set([...Object.keys(cur), ...Object.keys(prev)]);
+  return [...ids].map(id=>({ cat:cats[id]||{name:'?',icon:'',color:'#888'}, cur:cur[id]||0, prev:prev[id]||0, delta:(cur[id]||0)-(prev[id]||0) }))
+    .sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
+}
+
+// ---------- per-category mini history (for drill-down) ----------
+export function categoryHistory(categoryId, eurRate=117.5){
+  const rows = db.all(`SELECT substr(date,1,7) AS m, SUM(ABS(amount)*(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)) AS t
+    FROM transactions WHERE category_id=? AND amount<0 GROUP BY m ORDER BY m`, [eurRate, categoryId]);
+  return rows.map(r=>({ month:r.m, label:fmtMonth(r.m), total:r.t }));
+}
+
 export { fmtMonth };

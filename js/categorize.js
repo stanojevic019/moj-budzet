@@ -13,29 +13,29 @@ export function cleanMerchant(counterparty, description){
   return s;
 }
 
-// kind: 'expense' | 'income' | 'transfer'
+// kind: 'expense' | 'income' | 'transfer'; grp: 'needs' | 'wants' | null (for 50/30/20)
 export const SEED_CATEGORIES = [
-  ['Namirnice','expense','#22c55e','🛒'],
-  ['Restorani i kafići','expense','#f97316','🍽️'],
-  ['Gorivo','expense','#eab308','⛽'],
-  ['Putarina i parking','expense','#a3a3a3','🅿️'],
-  ['Zdravlje i apoteka','expense','#ef4444','💊'],
-  ['Drogerija i kozmetika','expense','#ec4899','🧴'],
-  ['Pretplate i digitalne usluge','expense','#8b5cf6','📺'],
-  ['Telefon i internet','expense','#0ea5e9','📱'],
-  ['Računi i režije','expense','#14b8a6','🧾'],
-  ['Šoping','expense','#f43f5e','🛍️'],
-  ['Putovanja','expense','#06b6d4','✈️'],
-  ['Podizanje keša','expense','#64748b','🏧'],
-  ['Bankarske naknade','expense','#94a3b8','🏦'],
-  ['Kredit – kamata','expense','#b91c1c','💳'],
-  ['Kredit – glavnica','expense','#7f1d1d','💳'],
-  ['Transfer drugima','transfer','#f59e0b','↗️'],
-  ['Interni prenos','transfer','#3b82f6','🔁'],
-  ['Ostalo / Nekategorisano','expense','#6b7280','❓'],
-  ['Zarada','income','#16a34a','💼'],
-  ['Ostali prilivi','income','#10b981','⬇️'],
-  ['Menjačnica (devize)','transfer','#0d9488','💱'],
+  ['Namirnice','expense','#22c55e','🛒','needs'],
+  ['Restorani i kafići','expense','#f97316','🍽️','wants'],
+  ['Gorivo','expense','#eab308','⛽','needs'],
+  ['Putarina i parking','expense','#a3a3a3','🅿️','needs'],
+  ['Zdravlje i apoteka','expense','#ef4444','💊','needs'],
+  ['Drogerija i kozmetika','expense','#ec4899','🧴','needs'],
+  ['Pretplate i digitalne usluge','expense','#8b5cf6','📺','wants'],
+  ['Telefon i internet','expense','#0ea5e9','📱','needs'],
+  ['Računi i režije','expense','#14b8a6','🧾','needs'],
+  ['Šoping','expense','#f43f5e','🛍️','wants'],
+  ['Putovanja','expense','#06b6d4','✈️','wants'],
+  ['Podizanje keša','expense','#64748b','🏧',null],
+  ['Bankarske naknade','expense','#94a3b8','🏦','needs'],
+  ['Kredit – kamata','expense','#b91c1c','💳','needs'],
+  ['Kredit – glavnica','expense','#7f1d1d','💳','needs'],
+  ['Transfer drugima','transfer','#f59e0b','↗️',null],
+  ['Interni prenos','transfer','#3b82f6','🔁',null],
+  ['Ostalo / Nekategorisano','expense','#6b7280','❓',null],
+  ['Zarada','income','#16a34a','💼',null],
+  ['Ostali prilivi','income','#10b981','⬇️',null],
+  ['Menjačnica (devize)','transfer','#0d9488','💱',null],
 ];
 
 // Rules: [matchText(UPPERCASE substring), categoryName, priority]. Lower priority wins.

@@ -6,8 +6,42 @@ import { cleanMerchant, categorize } from './categorize.js';
 
 export const getAccounts = (incl=false) =>
   db.all(`SELECT * FROM accounts ${incl?'':'WHERE archived=0'} ORDER BY type, name`);
-export const getCategories = () => db.all(`SELECT * FROM categories ORDER BY kind, name`);
+export const getCategories = (inclArchived=false) =>
+  db.all(`SELECT * FROM categories ${inclArchived?'':'WHERE archived=0'} ORDER BY kind, name`);
 export const getRules = () => db.all(`SELECT r.*, c.kind FROM rules r JOIN categories c ON c.id=r.category_id`);
+
+// ---------- budgets ----------
+export const getBudgets = () => db.all(
+  `SELECT b.*, c.name, c.icon, c.color, c.kind FROM budgets b JOIN categories c ON c.id=b.category_id`);
+export function setBudget(category_id, amount){
+  if(!(amount>0)){ db.run(`DELETE FROM budgets WHERE category_id=?`, [category_id]); return; }
+  db.run(`INSERT INTO budgets(category_id,amount,period) VALUES(?,?,'monthly')
+          ON CONFLICT(category_id) DO UPDATE SET amount=?`, [category_id, amount, amount]);
+}
+export const deleteBudget = (category_id) => db.run(`DELETE FROM budgets WHERE category_id=?`, [category_id]);
+
+// ---------- category management ----------
+export function addCategory({name, kind, color, icon, grp}){
+  db.run(`INSERT INTO categories(name,kind,color,icon,grp) VALUES(?,?,?,?,?)`,
+    [name, kind||'expense', color||'#6b7280', icon||'🏷️', grp||null]);
+  return db.lastId();
+}
+export function updateCategory(id, fields){
+  const allowed = ['name','color','icon','grp','kind'];
+  const keys = Object.keys(fields).filter(k=>allowed.includes(k));
+  if(!keys.length) return;
+  db.run(`UPDATE categories SET ${keys.map(k=>k+'=?').join(',')} WHERE id=?`, [...keys.map(k=>fields[k]), id]);
+}
+// Delete a category: move its transactions to "Ostalo / Nekategorisano", drop its budget/rules.
+export function deleteCategory(id){
+  const fallback = catMap()['Ostalo / Nekategorisano'];
+  if(id === fallback) return false;
+  db.run(`UPDATE transactions SET category_id=? WHERE category_id=?`, [fallback, id]);
+  db.run(`DELETE FROM budgets WHERE category_id=?`, [id]);
+  db.run(`DELETE FROM rules WHERE category_id=?`, [id]);
+  db.run(`DELETE FROM categories WHERE id=?`, [id]);
+  return true;
+}
 export const catMap = () => { const m={}; for(const c of getCategories()) m[c.name]=c.id; return m; };
 
 export function findOrCreateAccountByNumber(number, { bank, currency, name }){
