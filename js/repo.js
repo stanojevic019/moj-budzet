@@ -72,6 +72,18 @@ export function findOrCreateAccountByNumber(number, { bank, currency, name }){
   return db.get(`SELECT * FROM accounts WHERE id=?`, [db.lastId()]);
 }
 
+// Find (or create) the cash "slamarica" account for a given currency, so cash can
+// be held in multiple currencies (each currency = its own cash account, keeping
+// per-currency balances correct).
+export function findOrCreateCashAccount(currency){
+  currency = (currency||'RSD').toUpperCase().replace(/[^A-Z]/g,'').slice(0,3) || 'RSD';
+  const a = db.get(`SELECT * FROM accounts WHERE type='cash' AND currency=? AND archived=0`, [currency]);
+  if(a) return a;
+  const name = currency==='RSD' ? 'Keš (slamarica)' : `Keš (${currency})`;
+  db.run(`INSERT INTO accounts(name,type,currency,color) VALUES(?,?,?,?)`, [name,'cash',currency,'#64748b']);
+  return db.get(`SELECT * FROM accounts WHERE id=?`, [db.lastId()]);
+}
+
 function defaultCategoryId(isCredit){
   const m = catMap();
   return isCredit ? m['Ostali prilivi'] : m['Ostalo / Nekategorisano'];
