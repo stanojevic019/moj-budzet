@@ -87,9 +87,13 @@ export async function unlock(passphrase){
   cryptoKey = key;
   const blob = await idbGet('db');
   db = blob ? new SQL.Database(await decryptBytes(cryptoKey, blob)) : new SQL.Database();
-  if(!blob){ createSchema(); seed(); await save(); }
-  migrate();
-  await save();
+  if(!blob){ createSchema(); seed(); }
+  // migration + persistence are best-effort: a disk-write failure must NOT lock the
+  // user out of a vault that already decrypted correctly.
+  try { migrate(); await save(); } catch {}
+  // transparently upgrade a legacy KDF (e.g. 310k → 600k) on unlock, best-effort,
+  // so the stored work factor matches what the UI advertises.
+  if(iterations < DEFAULT_ITERATIONS){ try { await changePassphrase(passphrase); } catch {} }
   return true;
 }
 

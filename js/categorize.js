@@ -4,6 +4,18 @@
 // Card terminal id (e.g. "EX9281VGC0129845389") and trailing ISO country numeric code.
 const CARD_ID = /\bEX[A-Z0-9]{6,}\b/g;
 
+// Seed categories referenced BY NAME elsewhere (fallbacks + analytics exclude sets).
+// These must not be renamed or deleted or the name-keyed logic breaks.
+export const PROTECTED_CATEGORY_NAMES = new Set([
+  'Ostalo / Nekategorisano','Ostali prilivi','Podizanje keša','Interni prenos',
+  'Transfer drugima','Menjačnica (devize)','Kredit – glavnica',
+]);
+
+// Sanitize a user-entered category icon: short, no HTML-significant chars.
+export function sanitizeIcon(s){
+  return String(s||'').replace(/[<>&"'`]/g,'').trim().slice(0,4) || '🏷️';
+}
+
 export function cleanMerchant(counterparty, description){
   let s = (counterparty || '').replace(CARD_ID, ' ');
   s = s.replace(/\s+/g, ' ').trim();
