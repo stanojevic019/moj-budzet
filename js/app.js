@@ -143,7 +143,10 @@ function renderDashboard(s){
     return;
   }
   const months = m.map(x=>x.label);
-  const breakdown = an.categoryBreakdown(k.current.month,'expense',rate).slice(0,8);
+  const allOut = an.categoryBreakdown(k.current.month,'expense',rate);
+  const exSet = new Set(an.EXCLUDE_SPENDING);
+  const breakdown = allOut.filter(c=>!exSet.has(c.name)).slice(0,8);   // real spending
+  const flows = allOut.filter(c=>exSet.has(c.name));                   // transfers, cash, FX, loan principal
   const rec = an.recurring(rate);
   const recMonthly = rec.reduce((s,r)=>s+r.median,0);
   const runway = k.avgSpend ? nw.totalRSD / k.avgSpend : 0;
@@ -158,9 +161,9 @@ function renderDashboard(s){
 
   s.innerHTML = `
     <div class="kpis">
-      ${kpi('Neto vrednost', fmt(nw.totalRSD), `${balances.length} računa`, '')}
-      ${kpi('Potrošnja '+k.current.label, fmt(k.current.spending), k.momSpend==null?'':`${k.momSpend<=0?'📉':'📈'} ${pct(k.momSpend)} vs prošli mesec`, k.momSpend>0?'bad':'good')}
-      ${kpi('Štednja '+k.current.label, fmt(k.current.net), k.savingsRate==null?'':`stopa štednje ${k.savingsRate.toFixed(0)}%`, k.current.net>=0?'good':'bad')}
+      ${kpi('Neto vrednost', fmt(nw.totalRSD), `${balances.length} računa →`, '', 'data-action="goto" data-view="accounts"')}
+      ${kpi('Potrošnja '+k.current.label, fmt(k.current.spending), k.momSpend==null?'':`${k.momSpend<=0?'📉':'📈'} ${pct(k.momSpend)} vs prošli mesec`, k.momSpend>0?'bad':'good', `data-action="spend-month" data-month="${k.current.month}"`)}
+      ${kpi('Štednja '+k.current.label, fmt(k.current.net), k.savingsRate==null?'':`stopa štednje ${k.savingsRate.toFixed(0)}%`, k.current.net>=0?'good':'bad', 'data-action="goto" data-view="budgets"')}
       ${kpi('Prosečna potrošnja', fmt(k.avgSpend), `${k.monthsCount} mes. · rezerva ~${runway.toFixed(1)} mes.`, '')}
     </div>
 
@@ -204,6 +207,12 @@ function renderDashboard(s){
       <div class="muted small">Dodirni kategoriju za detalje →</div>
     </section>
 
+    ${flows.length ? `<section class="card">
+      <div class="row-between"><h3>Ostali tokovi · ${k.current.label}</h3><small>transferi · keš · devize</small></div>
+      ${flows.map(c=>`<div class="rec-row" data-action="drill" data-cat="${c.id}"><div>${esc(c.icon)} ${esc(c.name)}</div><b>${fmt(c.total)}</b></div>`).join('')}
+      <div class="muted small" style="margin-top:6px">Dodirni za detalje (npr. Transfer drugima) →</div>
+    </section>`:''}
+
     ${movers.length ? `<section class="card">
       <h3>Najveće promene vs ${k.prev?k.prev.label:'prošli mesec'}</h3>
       ${movers.map(x=>`<div class="rec-row" data-action="drill" data-cat="${x.cat.id||''}"><div>${esc(x.cat.icon)} ${esc(x.cat.name)}</div>
@@ -212,14 +221,14 @@ function renderDashboard(s){
 
     <section class="card">
       <h3>Računi</h3>
-      ${balances.map(a=>`<div class="acct-row"><span class="dot" style="background:${a.color}"></span>
+      ${balances.map(a=>`<div class="acct-row" data-action="acct" data-acct="${a.id}"><span class="dot" style="background:${a.color}"></span>
         <div class="ar-name">${esc(a.name)}<small>${a.type==='cash'?'keš':'banka'} · ${a.n} tx</small></div>
         <b class="${a.balance<0?'neg':''}">${fmt(a.balance,a.currency)}</b></div>`).join('')}
     </section>
 
     ${rec.length?`<section class="card">
       <h3>Pretplate i redovni troškovi <small>~${fmt(recMonthly)}/mes</small></h3>
-      ${rec.slice(0,12).map(r=>`<div class="rec-row"><div>${esc(r.merchant)}<small>${r.months} meseci</small></div><b>${fmt(r.median)}</b></div>`).join('')}
+      ${rec.slice(0,12).map(r=>`<div class="rec-row" data-action="merch" data-merch="${esc(r.merchant)}"><div>${esc(r.merchant)}<small>${r.months} meseci</small></div><b>${fmt(r.median)}</b></div>`).join('')}
     </section>`:''}
   `;
 
@@ -282,7 +291,7 @@ function insights(k, breakdown, recMonthly, proj){
   return `<section class="card insights"><h3>💡 Uvidi</h3>${tips.map(t=>`<div class="tip">${t}</div>`).join('')}</section>`;
 }
 
-const kpi = (label,val,sub,cls)=>`<div class="kpi ${cls}"><div class="kl">${label}</div><div class="kv">${val}</div><div class="ks">${sub}</div></div>`;
+const kpi = (label,val,sub,cls,attrs='')=>`<div class="kpi ${cls}" ${attrs}><div class="kl">${label}</div><div class="kv">${val}</div><div class="ks">${sub}</div></div>`;
 function barOpts(){ return { responsive:true, maintainAspectRatio:false,
   plugins:{ legend:{ labels:{ boxWidth:12, font:{size:11} } },
     tooltip:{ callbacks:{ label:c=>`${c.dataset.label}: ${fmtN(c.parsed.y)} RSD` } } },
@@ -329,9 +338,9 @@ function renderTx(s){
   const drill = txFilter.category ? catMapById[txFilter.category] : null;
 
   s.innerHTML = `
-    ${drill ? `<section class="card drill">
-      <div class="row-between"><h3>${esc(drill.icon)} ${esc(drill.name)}</h3><button class="ghost sm" data-action="clear-filters">✕ očisti</button></div>
-      <div class="chart-wrap small"><canvas id="cDrill"></canvas></div>
+    ${rows.length ? `<section class="card">
+      <div class="row-between"><h3>${drill?`${esc(drill.icon)} ${esc(drill.name)}`:'Kretanje po mesecima'}</h3>${activeFilterCount()?`<button class="ghost sm" data-action="clear-filters">✕ filteri</button>`:''}</div>
+      <div class="chart-wrap small"><canvas id="cFlt"></canvas></div>
     </section>`:''}
     <div class="toolbar">
       <select data-filter="month"><option value="">Svi meseci</option>${months.map(mm=>`<option value="${mm}" ${filterMonth===mm?'selected':''}>${an.fmtMonth(mm)}</option>`).join('')}</select>
@@ -374,10 +383,17 @@ function renderTx(s){
   const q=$('[data-filter="q"]',s); if(q) q.addEventListener('input', debounce(e=>{ txFilter.q=e.target.value||null; render(); },300));
   s.querySelectorAll('[data-type]').forEach(b=> b.addEventListener('click', ()=>{ txFilter.type=b.dataset.type||null; render(); }));
 
-  if(drill){
-    const hist = an.categoryHistory(drill.id, rate);
-    charts.drill = new window.Chart($('#cDrill'), { type:'bar', data:{ labels:hist.map(h=>h.label),
-      datasets:[{ label:drill.name, data:hist.map(h=>h.total), backgroundColor:drill.color }] }, options: barOpts() });
+  if(rows.length){
+    // chart reflects the CURRENT filters (month/account/category/type/amount/search)
+    const fm = db.all(`SELECT substr(date,1,7) AS m,
+      SUM(CASE WHEN amount<0 THEN -amount*${conv} ELSE 0 END) AS ex,
+      SUM(CASE WHEN amount>0 THEN amount*${conv} ELSE 0 END) AS inc
+      FROM transactions ${whereSql} GROUP BY m ORDER BY m`, params);
+    charts.flt = new window.Chart($('#cFlt'), { type:'bar', data:{ labels:fm.map(r=>an.fmtMonth(r.m)),
+      datasets:[
+        { label:'Rashodi', data:fm.map(r=>r.ex), backgroundColor:'#ef4444' },
+        { label:'Prihodi', data:fm.map(r=>r.inc), backgroundColor:'#22c55e' },
+      ]}, options: barOpts() });
   }
 }
 
@@ -494,6 +510,10 @@ function renderAccounts(s){
     ${balances.map(a=>`<section class="card acct-card">
       <div class="row-between"><div><b>${esc(a.name)}</b><div class="muted">${a.type==='cash'?'💵 keš':'🏦 banka'} · ${a.currency} · ${a.n} transakcija</div></div>
       <b class="${a.balance<0?'neg':''} big-num">${fmt(a.balance,a.currency)}</b></div>
+      <div class="form-row" style="margin-top:10px">
+        <button class="ghost" data-action="acct" data-acct="${a.id}">Transakcije</button>
+        <button class="primary" data-action="add-to-acct" data-acct="${a.id}">＋ Dodaj unos</button>
+      </div>
     </section>`).join('')}
     <section class="card">
       <h3>Dodaj račun</h3>
@@ -605,7 +625,7 @@ function modal(html){
   m.addEventListener('click', e=>{ if(e.target===m) m.remove(); });
   document.body.appendChild(m); return m;
 }
-function addManualModal(){
+function addManualModal(opts={}){
   const accounts = repo.getAccounts();
   const cats = repo.getCategories();
   const today = todayLocal();
@@ -615,8 +635,8 @@ function addManualModal(){
     <input id="mAmt" type="number" inputmode="decimal" placeholder="Iznos" />
     <input id="mDesc" placeholder="Opis / trgovac" />
     <div class="form-row">
-      <select id="mAcc">${accounts.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>
-      <input id="mDate" type="date" value="${today}" />
+      <label class="fld">Račun<select id="mAcc">${accounts.map(a=>`<option value="${a.id}" ${opts.accountId==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
+      <label class="fld">Datum (može i raniji)<input id="mDate" type="date" value="${today}" max="${today}" /></label>
     </div>
     <select id="mCat">${cats.map(c=>`<option value="${c.id}" data-kind="${c.kind}">${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
     <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="primary" id="mSave">Sačuvaj</button></div>
@@ -740,7 +760,11 @@ async function onClick(e){
   else if(act==='add-manual'){ addManualModal(); }
   else if(act==='edit-cat'){ editCatModal(+a.dataset.txid); }
   else if(act==='toggle-hide'){ db.setSetting('hide_amounts', hideAmounts()?'0':'1'); await persist(); applyPrefs(); const btn=$('[data-action="toggle-hide"]'); if(btn) btn.textContent=hideAmounts()?'🙈':'👁️'; }
-  else if(act==='drill'){ if(a.dataset.cat){ txFilter.category=+a.dataset.cat; view='tx'; render(); } }
+  else if(act==='drill'){ if(a.dataset.cat){ clearFilters(); txFilter.category=+a.dataset.cat; view='tx'; render(); } }
+  else if(act==='acct'){ clearFilters(); txFilter.account=+a.dataset.acct; view='tx'; render(); }
+  else if(act==='merch'){ clearFilters(); txFilter.q=a.dataset.merch; view='tx'; render(); }
+  else if(act==='add-to-acct'){ addManualModal({ accountId:+a.dataset.acct }); }
+  else if(act==='spend-month'){ clearFilters(); filterMonth=a.dataset.month; txFilter.type='expense'; view='tx'; render(); }
   else if(act==='toggle-filters'){ showFilters=!showFilters; render(); }
   else if(act==='clear-filters'){ clearFilters(); showFilters=false; render(); }
   else if(act==='edit-category'){ categoryEditModal(+a.dataset.id); }

@@ -166,6 +166,11 @@ code{background:var(--bg2); padding:2px 7px; border-radius:6px; font-size:.85em}
 .accent-dot{width:30px; height:30px; border-radius:50%; padding:0; border:2px solid transparent}
 .accent-dot.sel{border-color:var(--txt); transform:scale(1.12)}
 
+/* clickable deep-dive affordance */
+.kpi[data-action],.acct-row[data-action],.rec-row[data-action],.cl[data-action]{cursor:pointer}
+.kpi[data-action]:active,.acct-row[data-action]:active,.rec-row[data-action]:active,.cl[data-action]:active{opacity:.55}
+.acct-row[data-action]::after,.rec-row[data-action]::after{content:'›'; color:var(--muted); font-size:17px; margin-left:2px; flex:none}
+
 /* hide-amounts privacy mode */
 .hide-amounts .kv,.hide-amounts .tx-amt,.hide-amounts .big-num,.hide-amounts .acct-row b,
 .hide-amounts .cl b,.hide-amounts .tx-summary .pos,.hide-amounts .tx-summary .neg,
