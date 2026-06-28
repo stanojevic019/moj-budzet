@@ -36,6 +36,18 @@ async function idbSet(key, val){
     tx.onsuccess = () => res(); tx.onerror = () => rej(tx.error);
   });
 }
+// Atomic multi-key write: all puts share one transaction (all-or-nothing).
+async function idbSetMany(pairs){
+  const d = await idb();
+  return new Promise((res, rej) => {
+    const tx = d.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    for(const [k,v] of pairs) store.put(v, k);
+    tx.oncomplete = () => res();
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error);
+  });
+}
 
 export async function vaultExists(){
   return !!(await idbGet('verifier'));
@@ -46,17 +58,18 @@ async function ensureSql(){
   SQL = await window.initSqlJs({ locateFile: f => 'vendor/' + f });
 }
 
-// First-time setup: create vault with a passphrase.
+// First-time setup: create vault with a passphrase (atomic write).
 export async function createVault(passphrase){
   await ensureSql();
   const salt = randomBytes(16);
-  cryptoKey = await deriveKey(passphrase, salt);
-  await idbSet('salt', salt);
-  await idbSet('verifier', await makeVerifier(cryptoKey));
+  const key = await deriveKey(passphrase, salt);
   db = new SQL.Database();
   createSchema();
   seed();
-  await save();
+  const blob = await encryptBytes(key, db.export());
+  const verifier = await makeVerifier(key);
+  await idbSetMany([['salt', salt], ['verifier', verifier], ['db', blob]]);
+  cryptoKey = key;
 }
 
 // Unlock existing vault. Returns true on success, false on wrong passphrase.
@@ -85,11 +98,15 @@ export async function save(){
 }
 
 export async function changePassphrase(newPass){
+  if(!db) return;
   const salt = randomBytes(16);
-  cryptoKey = await deriveKey(newPass, salt);
-  await idbSet('salt', salt);
-  await idbSet('verifier', await makeVerifier(cryptoKey));
-  await save();
+  const key = await deriveKey(newPass, salt);
+  // Re-encrypt the DB under the new key and write salt+verifier+db atomically,
+  // so a mid-write failure can never leave salt/verifier and db keyed differently.
+  const blob = await encryptBytes(key, db.export());
+  const verifier = await makeVerifier(key);
+  await idbSetMany([['salt', salt], ['verifier', verifier], ['db', blob]]);
+  cryptoKey = key;
 }
 
 // ---------- schema ----------
@@ -124,7 +141,7 @@ function seed(){
   const catId = {};
   for(const [name, kind, color, icon] of SEED_CATEGORIES){
     db.run(`INSERT INTO categories(name,kind,color,icon) VALUES(?,?,?,?)`, [name,kind,color,icon]);
-    catId[name] = db.exec(`SELECT last_insert_rowid() AS id`)[0].values[0][0];
+    catId[name] = lastId();
   }
   for(const [match, catName, priority] of SEED_RULES){
     if(catId[catName] == null) continue;

@@ -19,9 +19,10 @@ const nf2 = new Intl.NumberFormat('sr-RS', { maximumFractionDigits:0 });
 function fmt(n, cur='RSD'){ return nf(cur).format(n||0); }
 function fmtN(n){ return nf2.format(Math.round(n||0)); }
 function pct(n){ return (n>=0?'+':'') + (n==null?'–':n.toFixed(0)) + '%'; }
-const esc = (s) => (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = (s) => (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const todayLocal = () => { const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); };
 
-function getEurRate(){ const r = db.get(`SELECT value FROM meta WHERE key='eur_rate'`); return r?+r.value:117.5; }
+function getEurRate(){ const r = db.get(`SELECT value FROM meta WHERE key='eur_rate'`); return r && +r.value>0 ? +r.value : 117.5; }
 function setEurRate(v){ db.run(`INSERT INTO meta(key,value) VALUES('eur_rate',?) ON CONFLICT(key) DO UPDATE SET value=?`, [String(v),String(v)]); }
 
 async function persist(){ await db.save(); }
@@ -61,7 +62,9 @@ function renderLock(exists){
       await db.createVault(pp); enterApp();
     } else {
       $('#lockBtn').disabled = true; $('#lockBtn').textContent='Otključavam…';
-      const ok = await db.unlock(pp);
+      let ok = false;
+      try { ok = await db.unlock(pp); }
+      catch(e){ err.textContent='Greška pri otključavanju (oštećena baza?).'; $('#lockBtn').disabled=false; $('#lockBtn').textContent='Otključaj'; return; }
       if(!ok){ err.textContent='Pogrešna lozinka.'; $('#lockBtn').disabled=false; $('#lockBtn').textContent='Otključaj'; return; }
       enterApp();
     }
@@ -105,17 +108,18 @@ function render(){
 
 // =================================================================== DASHBOARD
 function renderDashboard(s){
-  const k = an.kpis('RSD');
+  const rate = getEurRate();
+  const k = an.kpis(rate);
   const balances = an.accountBalances();
-  const nw = an.netWorth(getEurRate());
+  const nw = an.netWorth(rate);
   if(!k){
     s.innerHTML = empty('📥','Još nema podataka','Uvezi PDF izvod ili ručno dodaj transakciju da vidiš analizu.','Idi na uvoz','import');
     return;
   }
-  const m = an.monthly('RSD');
+  const m = an.monthly(rate);
   const months = m.map(x=>x.label);
-  const breakdown = an.categoryBreakdown(k.current.month,'expense','RSD').slice(0,8);
-  const rec = an.recurring('RSD');
+  const breakdown = an.categoryBreakdown(k.current.month,'expense',rate).slice(0,8);
+  const rec = an.recurring(rate);
   const recMonthly = rec.reduce((s,r)=>s+r.median,0);
   const runway = k.avgSpend ? nw.totalRSD / k.avgSpend : 0;
 
@@ -188,7 +192,8 @@ function insights(k, breakdown, recMonthly){
     if(k.momSpend>10) tips.push(`📈 Potrošnja je skočila <b>${pct(k.momSpend)}</b> u odnosu na prošli mesec.`);
     else if(k.momSpend<-10) tips.push(`📉 Bravo — potrošnja je pala <b>${pct(k.momSpend)}</b> vs prošli mesec.`);
   }
-  if(k.top) tips.push(`🏆 Najveća kategorija (${k.current.label}): <b>${esc(k.top.icon+' '+k.top.name)}</b> — ${fmt(k.top.total)} (${(k.top.total/k.current.spending*100||0).toFixed(0)}% potrošnje).`);
+  if(k.top){ const share = k.current.spending>0 ? (k.top.total/k.current.spending*100) : 0;
+    tips.push(`🏆 Najveća kategorija (${k.current.label}): <b>${esc(k.top.icon+' '+k.top.name)}</b> — ${fmt(k.top.total)} (${share.toFixed(0)}% potrošnje).`); }
   if(recMonthly>0) tips.push(`🔁 Redovni/pretplatni troškovi te koštaju oko <b>${fmt(recMonthly)}</b> mesečno (${fmt(recMonthly*12)} godišnje).`);
   return `<section class="card insights"><h3>💡 Uvidi</h3>${tips.map(t=>`<div class="tip">${t}</div>`).join('')}</section>`;
 }
@@ -203,7 +208,7 @@ function barOpts(){ return { responsive:true, maintainAspectRatio:false,
 function renderTx(s){
   const accounts = repo.getAccounts();
   const cats = repo.getCategories();
-  const months = an.monthly('RSD').map(x=>x.month).reverse();
+  const months = an.monthly(getEurRate()).map(x=>x.month).reverse();
   const acctMap = Object.fromEntries(accounts.map(a=>[a.id,a]));
   const catMapById = Object.fromEntries(cats.map(c=>[c.id,c]));
   let where = []; let params=[];
@@ -211,9 +216,15 @@ function renderTx(s){
   if(txFilter.account){ where.push(`account_id=?`); params.push(txFilter.account); }
   if(txFilter.category){ where.push(`category_id=?`); params.push(txFilter.category); }
   if(txFilter.q){ where.push(`(UPPER(merchant) LIKE ? OR UPPER(description) LIKE ?)`); const q='%'+txFilter.q.toUpperCase()+'%'; params.push(q,q); }
-  const rows = db.all(`SELECT * FROM transactions ${where.length?'WHERE '+where.join(' AND '):''} ORDER BY date DESC, id DESC LIMIT 500`, params);
-  const sumIn = rows.filter(r=>r.amount>0).reduce((s,r)=>s+r.amount,0);
-  const sumOut = rows.filter(r=>r.amount<0).reduce((s,r)=>s-r.amount,0);
+  const whereSql = where.length?'WHERE '+where.join(' AND '):'';
+  const rows = db.all(`SELECT * FROM transactions ${whereSql} ORDER BY date DESC, id DESC LIMIT 500`, params);
+  // Summary over the FULL filtered set (not the 500-row page), all in RSD base.
+  const conv = `(CASE currency WHEN 'EUR' THEN ${getEurRate()} ELSE 1 END)`;
+  const agg = db.get(`SELECT COUNT(*) AS n,
+     COALESCE(SUM(CASE WHEN amount>0 THEN amount*${conv} ELSE 0 END),0) AS inc,
+     COALESCE(SUM(CASE WHEN amount<0 THEN -amount*${conv} ELSE 0 END),0) AS out
+     FROM transactions ${whereSql}`, params);
+  const sumIn = agg.inc, sumOut = agg.out, totalN = agg.n;
 
   s.innerHTML = `
     <div class="toolbar">
@@ -223,7 +234,7 @@ function renderTx(s){
       <select data-filter="category"><option value="">Sve kategorije</option>${cats.map(c=>`<option value="${c.id}" ${txFilter.category==c.id?'selected':''}>${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
       <input data-filter="q" placeholder="🔎 Traži…" value="${esc(txFilter.q||'')}" />
     </div>
-    <div class="tx-summary"><span>${rows.length} transakcija</span><span class="pos">+${fmtN(sumIn)}</span><span class="neg">−${fmtN(sumOut)}</span></div>
+    <div class="tx-summary"><span>${totalN>rows.length?`${rows.length} od ${totalN}`:`${totalN} transakcija`}</span><span class="pos">+${fmtN(sumIn)}</span><span class="neg">−${fmtN(sumOut)}</span></div>
     <div class="tx-list">
       ${rows.map(r=>{
         const a=acctMap[r.account_id], c=catMapById[r.category_id]||{};
@@ -287,7 +298,8 @@ function renderPreview(){
     const inc=t.filter(x=>x.signed>0).reduce((s,x)=>s+x.signed,0);
     const exp=t.filter(x=>x.signed<0).reduce((s,x)=>s-x.signed,0);
     const rec = p.recon && p.recon.ok===true ? '<span class="pos">✓ saldo se slaže</span>'
-      : (p.recon && p.recon.ok===false ? '<span class="neg">⚠ saldo se ne slaže</span>' : '');
+      : (p.recon && p.recon.ok===false ? '<span class="neg">⚠ saldo se NE slaže — proveri uvoz</span>'
+      : '<span class="muted">⚠ saldo nije proveren (nije nađeno početno stanje)</span>');
     return `<section class="card imp"><div class="row-between"><b>✅ ${esc(p.file)}</b>${rec}</div>
       <div class="imp-grid">
         <div><span>Banka</span>${p.bank}</div>
@@ -392,7 +404,7 @@ function exportXlsx(){
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Transakcije');
   // monthly summary sheet
-  const m = an.monthly('RSD').map(x=>({ Mesec:x.month, Prihodi:Math.round(x.realIncome), Rashodi:Math.round(x.spending), Stednja:Math.round(x.net) }));
+  const m = an.monthly(getEurRate()).map(x=>({ Mesec:x.month, Prihodi:Math.round(x.realIncome), Rashodi:Math.round(x.spending), Stednja:Math.round(x.net) }));
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(m), 'Po mesecima');
   XLSX.writeFile(wb, `moj-budzet-${new Date().toISOString().slice(0,10)}.xlsx`);
 }
@@ -415,7 +427,7 @@ function modal(html){
 function addManualModal(){
   const accounts = repo.getAccounts();
   const cats = repo.getCategories();
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   const m = modal(`
     <h3>Nova transakcija</h3>
     <div class="seg"><button class="seg-b active" data-kind="expense">Rashod</button><button class="seg-b" data-kind="income">Prihod</button></div>

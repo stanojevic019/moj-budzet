@@ -98,11 +98,16 @@ export function parseIntesaPages(pages){
       if(Math.abs(delta) > 0.005) sign = delta > 0 ? 1 : -1;
     }
 
+    // magnitude: prefer parsed amount; else derive from balance delta; else unknown(0).
+    let mag;
+    if(amount != null) mag = Math.abs(amount);
+    else if(balance != null && prevBalance != null) mag = Math.abs(balance - prevBalance);
+    else mag = 0;
     txns.push({
       bookingDate: toISO(d.str),
       description, counterparty, acct,
-      amount: round2(Math.abs(amount != null ? amount : (balance!=null&&prevBalance!=null? balance-prevBalance:0))),
-      signed: round2(sign * Math.abs(amount != null ? amount : (balance-prevBalance))),
+      amount: round2(mag),
+      signed: round2(sign * mag),
       sign: sign > 0 ? 'credit' : 'debit',
       balance: balance != null ? round2(balance) : null,
       fee, fx, ref, account, currency,

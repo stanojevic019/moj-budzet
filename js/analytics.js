@@ -19,18 +19,19 @@ function catLookup(){
   return map;
 }
 
-// Monthly income / expense / spending / net for a currency.
-export function monthly(currency='RSD'){
+// Monthly income / expense / spending / net, all converted to an RSD base
+// (EUR amounts multiplied by eurRate) so every currency is included.
+export function monthly(eurRate=117.5){
   const cats = catLookup();
   const exS = new Set(EXCLUDE_SPENDING), exI = new Set(EXCLUDE_INCOME);
-  const rows = db.all(
-    `SELECT substr(date,1,7) AS m, amount, category_id FROM transactions WHERE currency=?`, [currency]);
+  const rows = db.all(`SELECT substr(date,1,7) AS m, amount, currency, category_id FROM transactions`);
   const byM = {};
   for(const r of rows){
     const c = cats[r.category_id]; const nm = c?c.name:'';
+    const amt = r.currency==='EUR' ? r.amount*eurRate : r.amount;
     const o = byM[r.m] || (byM[r.m] = { month:r.m, income:0, expense:0, spending:0, realIncome:0, net:0 });
-    if(r.amount >= 0){ o.income += r.amount; if(!exI.has(nm)) o.realIncome += r.amount; }
-    else { o.expense += -r.amount; if(!exS.has(nm)) o.spending += -r.amount; }
+    if(amt >= 0){ o.income += amt; if(!exI.has(nm)) o.realIncome += amt; }
+    else { o.expense += -amt; if(!exS.has(nm)) o.spending += -amt; }
   }
   const list = Object.values(byM).sort((a,b)=>a.month.localeCompare(b.month));
   list.forEach(o => { o.net = o.realIncome - o.spending; o.label = fmtMonth(o.month); });
@@ -38,14 +39,16 @@ export function monthly(currency='RSD'){
 }
 
 // Category breakdown for a given month ('YYYY-MM') or null = all months. kind expense|income.
-export function categoryBreakdown(month, kind='expense', currency='RSD'){
+// Totals are in RSD base (EUR converted via eurRate).
+export function categoryBreakdown(month, kind='expense', eurRate=117.5){
   const cats = catLookup();
   const sign = kind==='income' ? 'amount > 0' : 'amount < 0';
   const where = month ? `AND substr(date,1,7)=?` : '';
+  const params = month ? [eurRate, month] : [eurRate];
   const rows = db.all(
-    `SELECT category_id, SUM(ABS(amount)) AS total, COUNT(*) AS n
-     FROM transactions WHERE currency=? AND ${sign} ${where}
-     GROUP BY category_id`, month ? [currency, month] : [currency]);
+    `SELECT category_id, SUM(ABS(amount) * (CASE currency WHEN 'EUR' THEN ? ELSE 1 END)) AS total, COUNT(*) AS n
+     FROM transactions WHERE ${sign} ${where}
+     GROUP BY category_id`, params);
   const out = rows.map(r => {
     const c = cats[r.category_id] || { name:'?', color:'#888', icon:'' };
     return { id:r.category_id, name:c.name, color:c.color, icon:c.icon, total:r.total, n:r.n, kind:c.kind };
@@ -73,14 +76,15 @@ export function netWorth(eurRate=117.5){
 
 // Detect recurring charges (subscriptions, regular bills): same merchant appearing
 // in >= 3 distinct months. Returns estimated monthly cost.
-export function recurring(currency='RSD'){
+export function recurring(eurRate=117.5){
   const rows = db.all(
-    `SELECT merchant, substr(date,1,7) AS m, ABS(amount) AS amt
-     FROM transactions WHERE currency=? AND amount<0 AND merchant IS NOT NULL AND merchant<>''`, [currency]);
+    `SELECT merchant, substr(date,1,7) AS m, ABS(amount) AS amt, currency
+     FROM transactions WHERE amount<0 AND merchant IS NOT NULL AND merchant<>''`);
   const byMerch = {};
   for(const r of rows){
+    const amt = r.currency==='EUR' ? r.amt*eurRate : r.amt;
     const o = byMerch[r.merchant] || (byMerch[r.merchant] = { merchant:r.merchant, months:new Set(), amts:[] });
-    o.months.add(r.m); o.amts.push(r.amt);
+    o.months.add(r.m); o.amts.push(amt);
   }
   const list = [];
   for(const o of Object.values(byMerch)){
@@ -94,14 +98,14 @@ export function recurring(currency='RSD'){
 }
 
 // Headline KPIs for the dashboard.
-export function kpis(currency='RSD'){
-  const m = monthly(currency);
+export function kpis(eurRate=117.5){
+  const m = monthly(eurRate);
   if(!m.length) return null;
   const cur = m[m.length-1], prev = m[m.length-2];
   const avgSpend = m.reduce((s,x)=>s+x.spending,0)/m.length;
   const avgInc = m.reduce((s,x)=>s+x.realIncome,0)/m.length;
   const totalSaved = m.reduce((s,x)=>s+x.net,0);
-  const top = categoryBreakdown(cur.month,'expense',currency)[0] || null;
+  const top = categoryBreakdown(cur.month,'expense',eurRate)[0] || null;
   const momSpend = prev && prev.spending ? (cur.spending-prev.spending)/prev.spending*100 : null;
   const savingsRate = cur.realIncome ? cur.net/cur.realIncome*100 : null;
   const avgSavingsRate = avgInc ? (avgInc-avgSpend)/avgInc*100 : null;

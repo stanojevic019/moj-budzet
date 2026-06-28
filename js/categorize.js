@@ -35,12 +35,18 @@ export const SEED_CATEGORIES = [
   ['Ostalo / Nekategorisano','expense','#6b7280','❓'],
   ['Zarada','income','#16a34a','💼'],
   ['Ostali prilivi','income','#10b981','⬇️'],
-  ['Menjačnica (devize)','income','#0d9488','💱'],
+  ['Menjačnica (devize)','transfer','#0d9488','💱'],
 ];
 
-// Rules: [matchText(UPPERCASE substring), categoryName, priority]. Lower priority = checked first.
+// Rules: [matchText(UPPERCASE substring), categoryName, priority]. Lower priority wins.
+// Priority 1 = definitive transaction-TYPE descriptions (transfer/ATM/loan/fee/salary);
+// these must outrank merchant-name guesses (2-3) so e.g. a "Bezgotovinski prenos" to a
+// company whose name contains a store keyword is classed as a transfer, not shopping.
 export const SEED_RULES = [
-  // high-priority distinctive descriptions
+  // transaction-type descriptions — highest priority
+  ['BEZGOTOVINSKI PRENOS','Transfer drugima',1],
+  ['TRANSAKCIJE PO NALOGU','Transfer drugima',1],
+  ['GOTOVINSKA ISPLATA','Podizanje keša',1],
   ['NAPLATA REDOVNE KAMATE','Kredit – kamata',1],
   ['KAMAT','Kredit – kamata',2],
   ['NAPLATA GLAVNICE','Kredit – glavnica',1],
@@ -155,24 +161,25 @@ export const SEED_RULES = [
   ['PAYSPOT','Šoping',3],
   ['ALPROS','Šoping',3],
   ['STRADA','Šoping',3],
-  // transfers
-  ['BEZGOTOVINSKI PRENOS','Transfer drugima',3],
-  ['TRANSAKCIJE PO NALOGU','Transfer drugima',3],
+  // transfers (the specific transfer descriptions are defined at priority 1 above)
   ['PRENOS','Transfer drugima',4],
-  ['GOTOVINSKA ISPLATA','Podizanje keša',3],
   ['UPLATA','Ostali prilivi',5],
 ];
 
-// Apply rules to one transaction-like object.
-// catByName: Map(name -> categoryId). Returns categoryId or null.
+// Apply rules to one transaction-like object. Returns categoryId or null.
+// `rules` rows carry the category `kind` (from getRules' join). Matching is
+// sign-aware: an income transaction never gets an expense category and vice
+// versa (transfer categories apply to both). Reads either merchant_clean
+// (insert time) or merchant (DB row, on re-categorization).
 export function categorize(tx, rules, isCredit){
-  const hay = `${tx.merchant_clean||''} ${tx.description||''} ${tx.counterparty||''}`.toUpperCase();
+  const hay = `${tx.merchant_clean||tx.merchant||''} ${tx.description||''} ${tx.counterparty||''}`.toUpperCase();
   let best = null;
   for(const r of rules){
+    if(r.kind === 'income'  && !isCredit) continue;
+    if(r.kind === 'expense' &&  isCredit) continue;
     if(hay.includes(r.match)){
       if(best === null || r.priority < best.priority) best = r;
     }
   }
-  if(best) return best.category_id;
-  return null; // caller assigns default (Ostali prilivi for credit, Ostalo for debit)
+  return best ? best.category_id : null; // caller assigns default if null
 }
