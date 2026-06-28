@@ -1,0 +1,9 @@
+# Nikad ne objavljuj lične/finansijske podatke ni dev artefakte
+*.pdf
+*.xlsx
+*.csv
+transactions.json
+js_transactions.json
+node_modules/
+.DS_Store
+Thumbs.db
