@@ -2,7 +2,12 @@
 // (with auto-categorization + dedupe), statement import, and manual entry.
 
 import * as db from './db.js';
-import { cleanMerchant, categorize } from './categorize.js';
+import { cleanMerchant, categorize, sanitizeIcon, PROTECTED_CATEGORY_NAMES } from './categorize.js';
+
+export const isProtectedCategory = (id) => {
+  const c = db.get(`SELECT name FROM categories WHERE id=?`, [id]);
+  return !!(c && PROTECTED_CATEGORY_NAMES.has(c.name));
+};
 
 export const getAccounts = (incl=false) =>
   db.all(`SELECT * FROM accounts ${incl?'':'WHERE archived=0'} ORDER BY type, name`);
@@ -11,31 +16,40 @@ export const getCategories = (inclArchived=false) =>
 export const getRules = () => db.all(`SELECT r.*, c.kind FROM rules r JOIN categories c ON c.id=r.category_id`);
 
 // ---------- budgets ----------
-export const getBudgets = () => db.all(
-  `SELECT b.*, c.name, c.icon, c.color, c.kind FROM budgets b JOIN categories c ON c.id=b.category_id`);
 export function setBudget(category_id, amount){
   if(!(amount>0)){ db.run(`DELETE FROM budgets WHERE category_id=?`, [category_id]); return; }
   db.run(`INSERT INTO budgets(category_id,amount,period) VALUES(?,?,'monthly')
           ON CONFLICT(category_id) DO UPDATE SET amount=?`, [category_id, amount, amount]);
 }
-export const deleteBudget = (category_id) => db.run(`DELETE FROM budgets WHERE category_id=?`, [category_id]);
 
 // ---------- category management ----------
+const nameExists = (name, exceptId=null) =>
+  !!db.get(`SELECT id FROM categories WHERE name=? ${exceptId?'AND id<>?':''}`, exceptId?[name,exceptId]:[name]);
+
+// throws Error('exists') on duplicate name
 export function addCategory({name, kind, color, icon, grp}){
+  if(nameExists(name)) throw new Error('exists');
   db.run(`INSERT INTO categories(name,kind,color,icon,grp) VALUES(?,?,?,?,?)`,
-    [name, kind||'expense', color||'#6b7280', icon||'🏷️', grp||null]);
+    [name, kind||'expense', color||'#6b7280', sanitizeIcon(icon), grp||null]);
   return db.lastId();
 }
+// Protected (system) categories: only color/icon/grp editable, never name. throws Error('exists') on dup name.
 export function updateCategory(id, fields){
-  const allowed = ['name','color','icon','grp','kind'];
-  const keys = Object.keys(fields).filter(k=>allowed.includes(k));
+  const protectedCat = isProtectedCategory(id);
+  const allowed = protectedCat ? ['color','icon','grp'] : ['name','color','icon','grp'];
+  const out = {};
+  for(const k of allowed) if(k in fields) out[k] = k==='icon' ? sanitizeIcon(fields[k]) : fields[k];
+  if(out.name!=null && nameExists(out.name, id)) throw new Error('exists');
+  const keys = Object.keys(out);
   if(!keys.length) return;
-  db.run(`UPDATE categories SET ${keys.map(k=>k+'=?').join(',')} WHERE id=?`, [...keys.map(k=>fields[k]), id]);
+  db.run(`UPDATE categories SET ${keys.map(k=>k+'=?').join(',')} WHERE id=?`, [...keys.map(k=>out[k]), id]);
 }
 // Delete a category: move its transactions to "Ostalo / Nekategorisano", drop its budget/rules.
+// Protected/system categories cannot be deleted.
 export function deleteCategory(id){
+  if(isProtectedCategory(id)) return false;
   const fallback = catMap()['Ostalo / Nekategorisano'];
-  if(id === fallback) return false;
+  if(id === fallback || fallback == null) return false;
   db.run(`UPDATE transactions SET category_id=? WHERE category_id=?`, [fallback, id]);
   db.run(`DELETE FROM budgets WHERE category_id=?`, [id]);
   db.run(`DELETE FROM rules WHERE category_id=?`, [id]);

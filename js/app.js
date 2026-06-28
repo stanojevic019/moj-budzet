@@ -13,6 +13,7 @@ let filterMonth = null;   // 'YYYY-MM' or null = all
 const charts = {};
 let pendingImports = [];   // parsed files awaiting confirmation
 let drillCat = null;       // category drill-down (id) or null
+let budgetMonth = null;    // budgets view month (separate from tx filterMonth)
 let showFilters = false;   // advanced filter panel open
 let lockTimer = null;      // auto-lock timer
 let swReg = null;          // service-worker registration
@@ -133,14 +134,14 @@ function render(){
 // =================================================================== DASHBOARD
 function renderDashboard(s){
   const rate = getEurRate();
-  const k = an.kpis(rate);
+  const m = an.monthly(rate);            // computed once, reused by kpis below
+  const k = an.kpis(rate, m);
   const balances = an.accountBalances();
   const nw = an.netWorth(rate);
   if(!k){
     s.innerHTML = empty('📥','Još nema podataka','Uvezi PDF izvod ili ručno dodaj transakciju da vidiš analizu.','Idi na uvoz','import');
     return;
   }
-  const m = an.monthly(rate);
   const months = m.map(x=>x.label);
   const breakdown = an.categoryBreakdown(k.current.month,'expense',rate).slice(0,8);
   const rec = an.recurring(rate);
@@ -198,14 +199,14 @@ function renderDashboard(s){
       <div class="row-between"><h3>Rashodi po kategorijama · ${k.current.label}</h3></div>
       <div class="chart-wrap small"><canvas id="cCat"></canvas></div>
       <div class="cat-legend">
-        ${breakdown.map(c=>`<div class="cl" data-action="drill" data-cat="${c.id}"><span class="dot" style="background:${c.color}"></span>${c.icon} ${esc(c.name)}<b>${fmt(c.total)}</b></div>`).join('')}
+        ${breakdown.map(c=>`<div class="cl" data-action="drill" data-cat="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.icon)} ${esc(c.name)}<b>${fmt(c.total)}</b></div>`).join('')}
       </div>
       <div class="muted small">Dodirni kategoriju za detalje →</div>
     </section>
 
     ${movers.length ? `<section class="card">
       <h3>Najveće promene vs ${k.prev?k.prev.label:'prošli mesec'}</h3>
-      ${movers.map(x=>`<div class="rec-row" data-action="drill" data-cat="${x.cat.id||''}"><div>${x.cat.icon} ${esc(x.cat.name)}</div>
+      ${movers.map(x=>`<div class="rec-row" data-action="drill" data-cat="${x.cat.id||''}"><div>${esc(x.cat.icon)} ${esc(x.cat.name)}</div>
         <b class="${x.delta>0?'neg':'pos'}">${x.delta>0?'▲':'▼'} ${fmtN(Math.abs(x.delta))}</b></div>`).join('')}
     </section>`:''}
 
@@ -247,7 +248,7 @@ function renderDashboard(s){
 function budgetBar(b){
   const p = Math.min(100, b.pct);
   const col = b.pct>=100?'#ef4444':(b.pct>=80?'#eab308':'#22c55e');
-  return `<div class="bbar"><div class="bbar-top"><span>${b.icon} ${esc(b.name)}</span>
+  return `<div class="bbar"><div class="bbar-top"><span>${esc(b.icon)} ${esc(b.name)}</span>
     <span class="${b.over?'neg':''}">${fmt(b.spent)} / ${fmt(b.amount)}</span></div>
     <div class="bbar-track"><div class="bbar-fill" style="width:${p}%;background:${col}"></div></div></div>`;
 }
@@ -289,7 +290,9 @@ function barOpts(){ return { responsive:true, maintainAspectRatio:false,
 
 // =================================================================== TRANSACTIONS
 const txFilter = { account:null, category:null, q:null, from:null, to:null, min:null, max:null, type:null };
-function activeFilterCount(){ return ['account','category','q','from','to','min','max','type'].filter(k=>txFilter[k]).length + (filterMonth?1:0); }
+function activeFilterCount(){ let n = filterMonth?1:0;
+  for(const k of ['account','category','q','from','to','type']) if(txFilter[k]) n++;
+  if(+txFilter.min>0) n++; if(+txFilter.max>0) n++; return n; }
 function clearFilters(){ Object.keys(txFilter).forEach(k=>txFilter[k]=null); filterMonth=null; drillCat=null; }
 
 function buildTxWhere(){
@@ -301,8 +304,8 @@ function buildTxWhere(){
   if(txFilter.to){ where.push(`date<=?`); params.push(txFilter.to); }
   if(txFilter.type==='income') where.push(`amount>0`);
   if(txFilter.type==='expense') where.push(`amount<0`);
-  if(txFilter.min){ where.push(`ABS(amount)>=?`); params.push(+txFilter.min); }
-  if(txFilter.max){ where.push(`ABS(amount)<=?`); params.push(+txFilter.max); }
+  if(+txFilter.min>0){ where.push(`ABS(amount)>=?`); params.push(+txFilter.min); }
+  if(+txFilter.max>0){ where.push(`ABS(amount)<=?`); params.push(+txFilter.max); }
   if(txFilter.q){ where.push(`(UPPER(merchant) LIKE ? OR UPPER(description) LIKE ? OR UPPER(counterparty) LIKE ?)`);
     const q='%'+txFilter.q.toUpperCase()+'%'; params.push(q,q,q); }
   return { whereSql: where.length?'WHERE '+where.join(' AND '):'', params };
@@ -327,7 +330,7 @@ function renderTx(s){
 
   s.innerHTML = `
     ${drill ? `<section class="card drill">
-      <div class="row-between"><h3>${drill.icon} ${esc(drill.name)}</h3><button class="ghost sm" data-action="clear-filters">✕ očisti</button></div>
+      <div class="row-between"><h3>${esc(drill.icon)} ${esc(drill.name)}</h3><button class="ghost sm" data-action="clear-filters">✕ očisti</button></div>
       <div class="chart-wrap small"><canvas id="cDrill"></canvas></div>
     </section>`:''}
     <div class="toolbar">
@@ -354,7 +357,7 @@ function renderTx(s){
       ${rows.map(r=>{
         const a=acctMap[r.account_id], c=catMapById[r.category_id]||{};
         return `<div class="tx" data-txid="${r.id}">
-          <div class="tx-ic" style="background:${(c.color||'#888')}22;color:${c.color||'#888'}">${c.icon||'•'}</div>
+          <div class="tx-ic" style="background:${(c.color||'#888')}22;color:${c.color||'#888'}">${esc(c.icon||'•')}</div>
           <div class="tx-main">
             <div class="tx-t">${esc(r.merchant||r.description||'—')}</div>
             <div class="tx-s">${r.date} · ${esc(a?a.name:'')} · <span class="tx-cat" data-action="edit-cat" data-txid="${r.id}">${esc(c.name||'—')} ✎</span></div>
@@ -384,7 +387,7 @@ function renderBudgets(s){
   const m = an.monthly(rate);
   if(!m.length){ s.innerHTML = empty('🎯','Još nema podataka','Uvezi ili dodaj transakcije pa postavi mesečne budžete.','Dodaj/Uvezi','tx'); return; }
   const monthsList = m.map(x=>x.month).reverse();
-  const month = (filterMonth && monthsList.includes(filterMonth)) ? filterMonth : monthsList[0];
+  const month = (budgetMonth && monthsList.includes(budgetMonth)) ? budgetMonth : monthsList[0];
   const status = an.budgetStatus(month, rate);
   const cats = repo.getCategories().filter(c=>c.kind==='expense');
   const totalBudget = status.reduce((a,b)=>a+b.amount,0);
@@ -401,10 +404,10 @@ function renderBudgets(s){
       <h3>Mesečni limiti po kategoriji</h3>
       <p class="muted small">Ostavi prazno da ukloniš budžet.</p>
       ${cats.map(c=>{ const b=status.find(x=>x.category_id===c.id);
-        return `<div class="brow"><span>${c.icon} ${esc(c.name)}</span>
+        return `<div class="brow"><span>${esc(c.icon)} ${esc(c.name)}</span>
           <input type="number" inputmode="numeric" class="binput" data-budget="${c.id}" placeholder="—" value="${b?Math.round(b.amount):''}"></div>`; }).join('')}
     </section>`;
-  $('[data-bmonth]',s)?.addEventListener('change', e=>{ filterMonth=e.target.value; render(); });
+  $('[data-bmonth]',s)?.addEventListener('change', e=>{ budgetMonth=e.target.value; render(); });
   s.querySelectorAll('[data-budget]').forEach(inp=> inp.addEventListener('change', async e=>{
     repo.setBudget(+e.target.dataset.budget, parseFloat(e.target.value)||0); await persist(); toast('Budžet sačuvan.'); render();
   }));
@@ -528,7 +531,7 @@ function renderSettings(s){
       <h3>Kategorije <small>${cats.length}</small></h3>
       <p class="muted small">Dodirni kategoriju za izmenu (ime, boja, grupa) ili brisanje.</p>
       <div class="cat-grid">
-        ${cats.map(c=>`<button class="catchip" data-action="edit-category" data-id="${c.id}" style="border-color:${c.color}">${c.icon} ${esc(c.name)}</button>`).join('')}
+        ${cats.map(c=>`<button class="catchip" data-action="edit-category" data-id="${c.id}" style="border-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('')}
       </div>
       <button data-action="add-category">＋ Nova kategorija</button>
     </section>
@@ -634,7 +637,7 @@ function editCatModal(txId){
   const cats = repo.getCategories();
   const tx = db.get(`SELECT * FROM transactions WHERE id=?`,[txId]);
   const m = modal(`<h3>Kategorija</h3><div class="muted">${esc(tx.merchant||tx.description||'')}</div>
-    <div class="cat-pick">${cats.map(c=>`<button class="catp" data-cat="${c.id}" style="border-color:${c.color}">${c.icon} ${esc(c.name)}</button>`).join('')}</div>
+    <div class="cat-pick">${cats.map(c=>`<button class="catp" data-cat="${c.id}" style="border-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('')}</div>
     <div class="form-row"><button class="ghost" data-close>Zatvori</button>
     <button class="del-tx" data-action="del-tx" data-id="${txId}">🗑 Obriši transakciju</button></div>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
@@ -655,23 +658,27 @@ function fabSheet(){
 const CAT_COLORS=['#22c55e','#f97316','#eab308','#ef4444','#ec4899','#8b5cf6','#0ea5e9','#14b8a6','#f43f5e','#06b6d4','#64748b','#3b82f6'];
 function categoryEditModal(id){
   const c = db.get(`SELECT * FROM categories WHERE id=?`,[id]); if(!c) return;
+  const sys = repo.isProtectedCategory(id); // system category: only color/icon/grp editable
   const m = modal(`<h3>Izmena kategorije</h3>
+    ${sys?'<div class="muted small">Sistemska kategorija — naziv se ne može menjati ni obrisati (koristi se u analizi).</div>':''}
     <div class="form-row"><input id="ceIcon" value="${esc(c.icon||'')}" placeholder="🏷️" style="flex:0 0 64px;text-align:center" />
-      <input id="ceName" value="${esc(c.name)}" placeholder="Naziv" /></div>
+      <input id="ceName" value="${esc(c.name)}" placeholder="Naziv" ${sys?'disabled':''} /></div>
     <select id="ceGrp"><option value="">— grupa (50/30/20) —</option>
       <option value="needs" ${c.grp==='needs'?'selected':''}>Potrebe</option>
       <option value="wants" ${c.grp==='wants'?'selected':''}>Želje</option></select>
     <div class="muted small" style="margin-top:8px">Boja</div>
     <div class="accent-row">${CAT_COLORS.map(col=>`<button class="accent-dot ${c.color===col?'sel':''}" data-col="${col}" style="background:${col}"></button>`).join('')}</div>
     <div class="form-row" style="margin-top:10px"><button class="ghost" data-close>Otkaži</button><button class="primary" id="ceSave">Sačuvaj</button></div>
-    <button class="del-tx" id="ceDel" style="width:100%;margin-top:8px">🗑 Obriši kategoriju</button>`);
+    ${sys?'':'<button class="del-tx" id="ceDel" style="width:100%;margin-top:8px">🗑 Obriši kategoriju</button>'}`);
   let color=c.color;
   m.querySelectorAll('[data-col]').forEach(b=>b.onclick=()=>{ color=b.dataset.col; m.querySelectorAll('[data-col]').forEach(x=>x.classList.toggle('sel',x===b)); });
   m.querySelector('[data-close]').onclick=()=>m.remove();
   m.querySelector('#ceSave').onclick=async()=>{ const name=m.querySelector('#ceName').value.trim(); if(!name) return;
-    repo.updateCategory(id,{ name, icon:m.querySelector('#ceIcon').value.trim()||'🏷️', color, grp:m.querySelector('#ceGrp').value||null });
+    try { repo.updateCategory(id,{ name, icon:m.querySelector('#ceIcon').value, color, grp:m.querySelector('#ceGrp').value||null }); }
+    catch(e){ toast(e.message==='exists'?'Kategorija sa tim imenom već postoji.':'Greška.', false); return; }
     await persist(); m.remove(); toast('Kategorija sačuvana.'); render(); };
-  m.querySelector('#ceDel').onclick=async()=>{ if(confirm('Obrisati kategoriju? Njene transakcije se premeštaju u „Ostalo / Nekategorisano".')){
+  const del=m.querySelector('#ceDel');
+  if(del) del.onclick=async()=>{ if(confirm('Obrisati kategoriju? Njene transakcije se premeštaju u „Ostalo / Nekategorisano".')){
     if(repo.deleteCategory(id)){ await persist(); m.remove(); toast('Kategorija obrisana.'); render(); } else toast('Ova kategorija se ne može obrisati.',false); } };
 }
 function categoryAddModal(){
@@ -682,7 +689,8 @@ function categoryAddModal(){
     <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="primary" id="caSave">Dodaj</button></div>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
   m.querySelector('#caSave').onclick=async()=>{ const name=m.querySelector('#caName').value.trim(); if(!name) return;
-    repo.addCategory({ name, kind:m.querySelector('#caKind').value, icon:m.querySelector('#caIcon').value.trim()||'🏷️', grp:m.querySelector('#caGrp').value||null, color:'#6b7280' });
+    try { repo.addCategory({ name, kind:m.querySelector('#caKind').value, icon:m.querySelector('#caIcon').value, grp:m.querySelector('#caGrp').value||null, color:'#6b7280' }); }
+    catch(e){ toast(e.message==='exists'?'Kategorija sa tim imenom već postoji.':'Greška.', false); return; }
     await persist(); m.remove(); toast('Kategorija dodata.'); render(); };
 }
 
@@ -691,12 +699,16 @@ function resetAutoLock(){
   if(lockTimer){ clearTimeout(lockTimer); lockTimer=null; }
   if(!db.isOpen()) return;
   const min = autolockMin();
-  if(min>0) lockTimer = setTimeout(()=>{ lockTimer=null; db.lock(); renderLock(true); }, min*60000);
+  // Full reload (not partial re-render) so any open modal/toast showing decrypted
+  // data is wiped along with the in-memory key — same as manual lock.
+  if(min>0) lockTimer = setTimeout(()=>{ lockTimer=null; db.lock(); location.reload(); }, min*60000);
 }
 
 // ---------- service-worker auto-update ----------
+let hadController = false, userTriggeredUpdate = false;
 async function registerSW(){
   if(!('serviceWorker' in navigator)) return;
+  hadController = !!navigator.serviceWorker.controller; // false on first-ever install
   try {
     swReg = await navigator.serviceWorker.register('sw.js');
     swReg.addEventListener('updatefound', ()=>{
@@ -706,11 +718,15 @@ async function registerSW(){
       });
     });
     let reloaded=false;
-    navigator.serviceWorker.addEventListener('controllerchange', ()=>{ if(reloaded) return; reloaded=true; location.reload(); });
+    navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+      if(reloaded) return;
+      if(!hadController && !userTriggeredUpdate) return; // don't reload on first install
+      reloaded=true; location.reload();
+    });
     setInterval(()=>swReg && swReg.update().catch(()=>{}), 60000);
   } catch {}
 }
-function doUpdate(){ if(swReg && swReg.waiting) swReg.waiting.postMessage('skipWaiting'); else location.reload(); }
+function doUpdate(){ userTriggeredUpdate=true; if(swReg && swReg.waiting) swReg.waiting.postMessage('skipWaiting'); else location.reload(); }
 
 // =================================================================== EVENTS
 async function onClick(e){

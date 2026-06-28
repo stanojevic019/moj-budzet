@@ -8,6 +8,10 @@ import * as db from './db.js';
 export const EXCLUDE_SPENDING = ['Podizanje keša','Interni prenos','Transfer drugima','Menjačnica (devize)','Kredit – glavnica'];
 export const EXCLUDE_INCOME   = ['Menjačnica (devize)','Interni prenos','Transfer drugima'];
 
+// Shared SQL fragment: convert an amount to RSD base. Binds one `?` = eurRate.
+// `currency` is unambiguous (only the transactions table has it).
+const CONV = `(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)`;
+
 const fmtMonth = (m) => {
   const [y,mm] = m.split('-'); const names=['','jan','feb','mar','apr','maj','jun','jul','avg','sep','okt','nov','dec'];
   return `${names[+mm]} ${y.slice(2)}`;
@@ -46,7 +50,7 @@ export function categoryBreakdown(month, kind='expense', eurRate=117.5){
   const where = month ? `AND substr(date,1,7)=?` : '';
   const params = month ? [eurRate, month] : [eurRate];
   const rows = db.all(
-    `SELECT category_id, SUM(ABS(amount) * (CASE currency WHEN 'EUR' THEN ? ELSE 1 END)) AS total, COUNT(*) AS n
+    `SELECT category_id, SUM(ABS(amount) * ${CONV}) AS total, COUNT(*) AS n
      FROM transactions WHERE ${sign} ${where}
      GROUP BY category_id`, params);
   const out = rows.map(r => {
@@ -98,8 +102,8 @@ export function recurring(eurRate=117.5){
 }
 
 // Headline KPIs for the dashboard.
-export function kpis(eurRate=117.5){
-  const m = monthly(eurRate);
+export function kpis(eurRate=117.5, m=null){
+  m = m || monthly(eurRate);
   if(!m.length) return null;
   const cur = m[m.length-1], prev = m[m.length-2];
   const avgSpend = m.reduce((s,x)=>s+x.spending,0)/m.length;
@@ -113,13 +117,16 @@ export function kpis(eurRate=117.5){
 }
 
 // ---------- budgets ----------
-// Spending vs monthly budget for a given month. Returns rows sorted worst-first.
+// Spending vs monthly budget for a given month. Reuses categoryBreakdown so the
+// per-category spend definition lives in exactly one place. Sorted worst-first.
 export function budgetStatus(month, eurRate=117.5){
-  const budgets = db.all(`SELECT b.category_id, b.amount, c.name, c.icon, c.color FROM budgets b JOIN categories c ON c.id=b.category_id`);
+  const budgets = db.all(`SELECT b.category_id, b.amount, c.name, c.icon, c.color
+    FROM budgets b JOIN categories c ON c.id=b.category_id WHERE c.archived=0`);
+  const spendByCat = {};
+  for(const r of categoryBreakdown(month,'expense',eurRate)) spendByCat[r.id] = r.total;
   const rows = budgets.map(b=>{
-    const r = db.get(`SELECT COALESCE(SUM(ABS(amount)*(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)),0) AS spent
-      FROM transactions WHERE category_id=? AND amount<0 AND substr(date,1,7)=?`, [eurRate, b.category_id, month]);
-    const spent=r.spent, pct=b.amount? spent/b.amount*100 : 0;
+    const spent = spendByCat[b.category_id] || 0;
+    const pct = b.amount ? spent/b.amount*100 : 0;
     return {...b, spent, pct, remaining:b.amount-spent, over:spent>b.amount};
   });
   return rows.sort((a,b)=>b.pct-a.pct);
@@ -142,22 +149,27 @@ export function projection(month, eurRate, todayISO){
   const [y,m] = month.split('-').map(Number);
   const daysInMonth = new Date(y, m, 0).getDate();
   const day = Number(todayISO.slice(8,10));
-  const r = db.get(`SELECT COALESCE(SUM(ABS(amount)*(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)),0) AS s
+  const r = db.get(`SELECT COALESCE(SUM(ABS(amount)*${CONV}),0) AS s
     FROM transactions WHERE amount<0 AND substr(date,1,7)=?`, [eurRate, month]);
   const spent=r.s; if(day<1) return null;
   return { spent, projected: spent/day*daysInMonth, day, daysInMonth };
 }
 
 // ---------- net-worth over time (per-account, all currencies → RSD) ----------
+// Single grouped query + in-memory running totals (no O(months×accounts) queries).
 export function netWorthSeries(eurRate=117.5){
   const accts = db.all(`SELECT id, currency, opening_balance FROM accounts WHERE archived=0`);
   const months = db.all(`SELECT DISTINCT substr(date,1,7) AS m FROM transactions ORDER BY m`).map(r=>r.m);
+  if(!months.length) return [];
+  const deltas = db.all(`SELECT account_id, substr(date,1,7) AS m, SUM(amount) AS s FROM transactions GROUP BY account_id, m`);
+  const byAcct = {};
+  for(const d of deltas){ (byAcct[d.account_id] || (byAcct[d.account_id]={}))[d.m] = d.s; }
+  const cum = {}; for(const a of accts) cum[a.id] = a.opening_balance;
   return months.map(m=>{
     let total=0;
     for(const a of accts){
-      const r = db.get(`SELECT COALESCE(SUM(amount),0) AS s FROM transactions WHERE account_id=? AND substr(date,1,7)<=?`, [a.id, m]);
-      const bal = a.opening_balance + r.s;
-      total += a.currency==='EUR' ? bal*eurRate : bal;
+      cum[a.id] += (byAcct[a.id] && byAcct[a.id][m]) || 0;
+      total += a.currency==='EUR' ? cum[a.id]*eurRate : cum[a.id];
     }
     return { month:m, label:fmtMonth(m), net: total };
   });
@@ -166,7 +178,7 @@ export function netWorthSeries(eurRate=117.5){
 // ---------- biggest category movers (cur vs prev month) ----------
 export function categoryMovers(curMonth, prevMonth, eurRate=117.5){
   const cats = catLookup();
-  const q = (mo)=>{ const rows=db.all(`SELECT category_id, SUM(ABS(amount)*(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)) AS t
+  const q = (mo)=>{ const rows=db.all(`SELECT category_id, SUM(ABS(amount)*${CONV}) AS t
       FROM transactions WHERE amount<0 AND substr(date,1,7)=? GROUP BY category_id`, [eurRate, mo]);
     const map={}; rows.forEach(r=>map[r.category_id]=r.t); return map; };
   const cur=q(curMonth), prev=prevMonth?q(prevMonth):{};
@@ -177,7 +189,7 @@ export function categoryMovers(curMonth, prevMonth, eurRate=117.5){
 
 // ---------- per-category mini history (for drill-down) ----------
 export function categoryHistory(categoryId, eurRate=117.5){
-  const rows = db.all(`SELECT substr(date,1,7) AS m, SUM(ABS(amount)*(CASE currency WHEN 'EUR' THEN ? ELSE 1 END)) AS t
+  const rows = db.all(`SELECT substr(date,1,7) AS m, SUM(ABS(amount)*${CONV}) AS t
     FROM transactions WHERE category_id=? AND amount<0 GROUP BY m ORDER BY m`, [eurRate, categoryId]);
   return rows.map(r=>({ month:r.m, label:fmtMonth(r.m), total:r.t }));
 }
