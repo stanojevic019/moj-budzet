@@ -29,8 +29,23 @@ function pct(n){ return (n>=0?'+':'') + (n==null?'–':n.toFixed(0)) + '%'; }
 const esc = (s) => (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const todayLocal = () => { const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); };
 
-function getEurRate(){ const v = +db.getSetting('eur_rate', '117.5'); return v>0 ? v : 117.5; }
-function setEurRate(v){ db.setSetting('eur_rate', v); }
+const CURRENCIES = ['RSD','EUR','USD','CHF','GBP'];
+const DEFAULT_RATES = { EUR:117.5, USD:108, CHF:125, GBP:137 };
+function getRate(ccy){
+  if(ccy==='RSD') return 1;
+  let v = +db.getSetting('rate_'+ccy, '');
+  if(!(v>0) && ccy==='EUR') v = +db.getSetting('eur_rate','');   // legacy key
+  if(!(v>0)) v = DEFAULT_RATES[ccy] || 1;
+  return v>0 ? v : 1;
+}
+function setRate(ccy, v){ db.setSetting('rate_'+ccy, v); }
+// currency→rate map for all currencies in use (+ the common ones), RSD=1
+function rates(){
+  const m = { RSD:1 }; const set = new Set(CURRENCIES);
+  repo.getAccounts(true).forEach(a=>set.add(a.currency));
+  set.forEach(c=>{ if(c!=='RSD') m[c] = getRate(c); });
+  return m;
+}
 const hideAmounts = () => db.getSetting('hide_amounts','0')==='1';
 const accent = () => db.getSetting('accent', '#3b82f6');
 const autolockMin = () => +db.getSetting('autolock_min','5');
@@ -133,7 +148,7 @@ function render(){
 
 // =================================================================== DASHBOARD
 function renderDashboard(s){
-  const rate = getEurRate();
+  const rate = rates();                  // currency→RSD map
   const m = an.monthly(rate);            // computed once, reused by kpis below
   const k = an.kpis(rate, m);
   const balances = an.accountBalances();
@@ -321,7 +336,7 @@ function buildTxWhere(){
 }
 
 function renderTx(s){
-  const rate=getEurRate();
+  const rate=rates();
   const accounts = repo.getAccounts();
   const cats = repo.getCategories();
   const months = an.monthly(rate).map(x=>x.month).reverse();
@@ -329,7 +344,7 @@ function renderTx(s){
   const catMapById = Object.fromEntries(cats.map(c=>[c.id,c]));
   const { whereSql, params } = buildTxWhere();
   const rows = db.all(`SELECT * FROM transactions ${whereSql} ORDER BY date DESC, id DESC LIMIT 500`, params);
-  const conv = `(CASE currency WHEN 'EUR' THEN ${rate} ELSE 1 END)`;
+  const conv = an.convExpr(rate);
   const agg = db.get(`SELECT COUNT(*) AS n,
      COALESCE(SUM(CASE WHEN amount>0 THEN amount*${conv} ELSE 0 END),0) AS inc,
      COALESCE(SUM(CASE WHEN amount<0 THEN -amount*${conv} ELSE 0 END),0) AS out
@@ -399,7 +414,7 @@ function renderTx(s){
 
 // =================================================================== BUDGETS
 function renderBudgets(s){
-  const rate=getEurRate();
+  const rate=rates();
   const m = an.monthly(rate);
   if(!m.length){ s.innerHTML = empty('🎯','Još nema podataka','Uvezi ili dodaj transakcije pa postavi mesečne budžete.','Dodaj/Uvezi','tx'); return; }
   const monthsList = m.map(x=>x.month).reverse();
@@ -502,10 +517,14 @@ async function confirmImport(){
 // =================================================================== ACCOUNTS
 function renderAccounts(s){
   const balances = an.accountBalances();
-  const nw = an.netWorth(getEurRate());
+  const nw = an.netWorth(rates());
+  // currencies in use (non-RSD) → editable rates; always offer EUR
+  const used = [...new Set(balances.map(a=>a.currency))].filter(c=>c!=='RSD');
+  if(!used.includes('EUR')) used.unshift('EUR');
   s.innerHTML = `
     <section class="card"><div class="row-between"><h3>Neto vrednost</h3><b class="big-num">${fmt(nw.totalRSD)}</b></div>
-      <div class="muted">EUR se preračunava po kursu <input type="number" id="eurRate" value="${getEurRate()}" step="0.1" style="width:80px"> RSD.</div>
+      <div class="muted small" style="margin-top:8px">Kursna lista (preračun u RSD):</div>
+      ${used.map(c=>`<div class="brow"><span>1 ${c} =</span><input type="number" class="binput" data-rate="${c}" value="${getRate(c)}" step="0.1"> <span style="flex:none">RSD</span></div>`).join('')}
     </section>
     ${balances.map(a=>`<section class="card acct-card">
       <div class="row-between"><div><b>${esc(a.name)}</b><div class="muted">${a.type==='cash'?'💵 keš':'🏦 banka'} · ${a.currency} · ${a.n} transakcija</div></div>
@@ -520,12 +539,14 @@ function renderAccounts(s){
       <input id="naName" placeholder="Naziv (npr. Banka 2 – tekući)" />
       <div class="form-row">
         <select id="naType"><option value="bank">Banka</option><option value="cash">Keš</option></select>
-        <select id="naCur"><option>RSD</option><option>EUR</option></select>
+        <select id="naCur">${CURRENCIES.map(c=>`<option>${c}</option>`).join('')}</select>
         <input id="naOpen" type="number" placeholder="Početno stanje" />
       </div>
       <button class="primary" data-action="add-account">Dodaj račun</button>
     </section>`;
-  $('#eurRate').addEventListener('change', async e=>{ setEurRate(+e.target.value); await persist(); render(); });
+  s.querySelectorAll('[data-rate]').forEach(inp=> inp.addEventListener('change', async e=>{
+    setRate(e.target.dataset.rate, +e.target.value); await persist(); render();
+  }));
 }
 
 // =================================================================== SETTINGS
@@ -605,7 +626,7 @@ function exportXlsx(){
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Transakcije');
   // monthly summary sheet
-  const m = an.monthly(getEurRate()).map(x=>({ Mesec:x.month, Prihodi:Math.round(x.realIncome), Rashodi:Math.round(x.spending), Stednja:Math.round(x.net) }));
+  const m = an.monthly(rates()).map(x=>({ Mesec:x.month, Prihodi:Math.round(x.realIncome), Rashodi:Math.round(x.spending), Stednja:Math.round(x.net) }));
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(m), 'Po mesecima');
   XLSX.writeFile(wb, `moj-budzet-${new Date().toISOString().slice(0,10)}.xlsx`);
 }
@@ -634,20 +655,42 @@ function addManualModal(opts={}){
     <div class="seg"><button class="seg-b active" data-kind="expense">Rashod</button><button class="seg-b" data-kind="income">Prihod</button></div>
     <input id="mAmt" type="number" inputmode="decimal" placeholder="Iznos" />
     <input id="mDesc" placeholder="Opis / trgovac" />
+    <label class="fld">Račun<select id="mAcc">${accounts.map(a=>`<option value="${a.id}" ${opts.accountId==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
     <div class="form-row">
-      <label class="fld">Račun<select id="mAcc">${accounts.map(a=>`<option value="${a.id}" ${opts.accountId==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
+      <label class="fld">Valuta<select id="mCur">${CURRENCIES.map(c=>`<option>${c}</option>`).join('')}</select></label>
       <label class="fld">Datum (može i raniji)<input id="mDate" type="date" value="${today}" max="${today}" /></label>
     </div>
+    <div class="muted small" id="mCurHint"></div>
     <select id="mCat">${cats.map(c=>`<option value="${c.id}" data-kind="${c.kind}">${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
     <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="primary" id="mSave">Sačuvaj</button></div>
   `);
   let kind='expense';
   m.querySelectorAll('.seg-b').forEach(b=> b.onclick=()=>{ kind=b.dataset.kind; m.querySelectorAll('.seg-b').forEach(x=>x.classList.toggle('active',x===b)); });
   m.querySelector('[data-close]').onclick=()=>m.remove();
+  const accSel=m.querySelector('#mAcc'), curSel=m.querySelector('#mCur'), hint=m.querySelector('#mCurHint');
+  // Currency follows the account; for the cash "slamarica" it's free to choose
+  // (a different currency routes to that currency's own cash account).
+  function syncCur(){
+    const a = accounts.find(x=>x.id===+accSel.value);
+    const cash = a && a.type==='cash';
+    if(!cash){ curSel.value = a?a.currency:'RSD'; }
+    curSel.disabled = !cash;
+    onCur();
+  }
+  function onCur(){
+    const a = accounts.find(x=>x.id===+accSel.value);
+    if(a && a.type==='cash' && curSel.value!==a.currency)
+      hint.textContent = `Ide u keš „${curSel.value}" (kreira se ako ne postoji).`;
+    else hint.textContent = '';
+  }
+  syncCur(); accSel.onchange=syncCur; curSel.onchange=onCur;
   m.querySelector('#mSave').onclick = async ()=>{
     const amount = parseFloat(m.querySelector('#mAmt').value);
     if(!(amount>0)){ m.querySelector('#mAmt').focus(); return; }
-    repo.addManual({ account_id:+m.querySelector('#mAcc').value, date:m.querySelector('#mDate').value,
+    let accId = +accSel.value;
+    const acc = accounts.find(a=>a.id===accId);
+    if(acc && acc.type==='cash' && curSel.value!==acc.currency) accId = repo.findOrCreateCashAccount(curSel.value).id;
+    repo.addManual({ account_id:accId, date:m.querySelector('#mDate').value,
       amount, kind, category_id:+m.querySelector('#mCat').value, description:m.querySelector('#mDesc').value });
     await persist(); m.remove(); toast('Transakcija dodata.'); render();
   };
