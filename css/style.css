@@ -127,3 +127,47 @@ code{background:var(--bg2); padding:2px 7px; border-radius:6px; font-size:.85em}
 .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
 .toast.err{border-color:#5e1b1b}
 @media(min-width:560px){ .imp-grid,.cat-legend{grid-template-columns:1fr 1fr 1fr} }
+
+/* ---------- v2 additions ---------- */
+.tb-actions{display:flex; gap:4px}
+.iconbtn{background:transparent; font-size:18px; padding:6px 9px}
+.fab{position:fixed; right:16px; bottom:78px; z-index:30; width:54px; height:54px; border-radius:50%;
+  background:var(--accent); color:#fff; font-size:28px; line-height:1; box-shadow:0 6px 18px rgba(0,0,0,.4);
+  display:flex; align-items:center; justify-content:center; padding:0}
+@media(min-width:780px){ .fab{right:calc(50% - 380px + 16px)} }
+.update-banner{position:sticky; top:52px; z-index:9; background:var(--accent); color:#fff; padding:9px 14px;
+  font-size:13px; display:flex; align-items:center; justify-content:center; gap:10px}
+.update-banner.hidden{display:none}
+.update-banner button{background:rgba(255,255,255,.25); color:#fff; padding:5px 12px; font-size:13px}
+
+/* budget + ratio bars */
+.bbar{margin:9px 0}
+.bbar-top{display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:4px; gap:8px}
+.bbar-track{position:relative; height:9px; background:var(--bg2); border-radius:6px; overflow:hidden}
+.bbar-fill{height:100%; border-radius:6px; transition:width .4s}
+.bbar-target{position:absolute; top:-2px; bottom:-2px; width:2px; background:var(--txt); opacity:.5; overflow:visible}
+.brow{display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--line)}
+.brow:last-child{border-bottom:none} .brow span{flex:1; font-size:13.5px}
+.binput{width:110px; margin:0; padding:8px; text-align:right}
+.toolbar2{margin-bottom:10px} .toolbar2 select{margin:0}
+
+/* filters */
+.filt-toggle{white-space:nowrap; grid-column:1/-1}
+.filters .fld{display:flex; flex-direction:column; font-size:11px; color:var(--muted); gap:2px}
+.filters .fld input{margin:0}
+.type-seg{margin-bottom:8px}
+.drill h3{font-size:16px}
+.ghost.sm{padding:5px 10px; font-size:12px}
+
+/* category management */
+.cat-grid{display:flex; flex-wrap:wrap; gap:7px; margin:8px 0}
+.catchip{border:1px solid var(--line); border-left-width:4px; font-size:12.5px; padding:8px 11px; background:var(--bg2)}
+.accent-row{display:flex; gap:9px; flex-wrap:wrap; margin:6px 0}
+.accent-dot{width:30px; height:30px; border-radius:50%; padding:0; border:2px solid transparent}
+.accent-dot.sel{border-color:var(--txt); transform:scale(1.12)}
+
+/* hide-amounts privacy mode */
+.hide-amounts .kv,.hide-amounts .tx-amt,.hide-amounts .big-num,.hide-amounts .acct-row b,
+.hide-amounts .cl b,.hide-amounts .tx-summary .pos,.hide-amounts .tx-summary .neg,
+.hide-amounts .rec-row b,.hide-amounts .bbar-top span:last-child,.hide-amounts .ar-name~b{
+  filter:blur(8px); transition:filter .15s; user-select:none}

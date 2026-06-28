@@ -15,11 +15,29 @@ sadrži isključivo kôd aplikacije; nikakvi lični/finansijski podaci nisu ovde
 
 Aplikacija radi i offline nakon prvog otvaranja.
 
+## Mogućnosti
+
+- **Uvoz PDF izvoda** (Banca Intesa, RSD i EUR) + ručni unos; više računa i keš.
+- **Budžeti** — mesečni limiti po kategoriji, napredak i upozorenja na prekoračenje.
+- **Analiza kao ekonomista** — pravilo 50/30/20 (potrebe/želje/štednja), projekcija
+  potrošnje do kraja meseca, trend neto vrednosti, najveće promene po kategorijama,
+  stopa štednje, rezerva u mesecima, pretplate.
+- **Filtriranje i izolacija troškova** — po mesecu, računu, kategoriji, opsegu datuma
+  i iznosa, tipu (prihod/rashod), pretraga; drill-down po kategoriji sa sopstvenim trendom.
+- **Prilagođavanje** — kategorije (ime/boja/grupa/brisanje), pravila auto-kategorizacije,
+  akcenat boja.
+- **Izvoz** u Excel/CSV.
+
 ## Bezbednost
 
-- Lozinka → ključ (PBKDF2, 310k iteracija) → AES-256-GCM šifruje celu bazu.
+- Lozinka → ključ (PBKDF2, 600k iteracija) → AES-256-GCM šifruje celu bazu.
 - Baza (SQLite preko sql.js) čuva se lokalno u IndexedDB, uvek šifrovana.
+- **Automatsko zaključavanje** pri neaktivnosti i **režim skrivanja iznosa** (privatnost).
 - Lozinka se nigde ne pamti; ako se zaboravi, podaci se ne mogu povratiti.
+
+## Auto-update
+
+Aplikacija proverava nove verzije i ponudi „Osveži" kad je nova verzija spremna.
 
 ## Tehnologije
 

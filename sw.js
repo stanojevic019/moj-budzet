@@ -1,6 +1,6 @@
 // Offline service worker: cache-first for the app shell + libraries.
 // Bump CACHE when files change to force an update.
-const CACHE = 'moj-budzet-v2';
+const CACHE = 'moj-budzet-v3';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest',
   './css/style.css',
@@ -13,8 +13,11 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(()=>self.skipWaiting()));
+  // Do NOT skipWaiting automatically — the new version waits until the user taps
+  // "Osveži", then we skipWaiting + reload (auto-update UX without surprise reloads).
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
 });
+self.addEventListener('message', e => { if(e.data === 'skipWaiting') self.skipWaiting(); });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(keys => Promise.all(
     keys.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(()=>self.clients.claim()));

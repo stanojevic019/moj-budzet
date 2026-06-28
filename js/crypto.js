@@ -7,17 +7,19 @@
 // The passphrase itself is never stored. A small "verifier" token (a known string
 // encrypted with the key) lets us check the passphrase on unlock without storing it.
 
-const ITERATIONS = 310000;
+// OWASP-recommended PBKDF2-SHA256 work factor (2023+). Stored per-vault so the
+// default can change later without breaking existing vaults.
+export const DEFAULT_ITERATIONS = 600000;
 const VERIFIER_PLAINTEXT = 'my-budget-verify-v1';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-export async function deriveKey(passphrase, saltBytes){
+export async function deriveKey(passphrase, saltBytes, iterations = DEFAULT_ITERATIONS){
   const baseKey = await crypto.subtle.importKey(
     'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
-    { name:'PBKDF2', salt: saltBytes, iterations: ITERATIONS, hash:'SHA-256' },
+    { name:'PBKDF2', salt: saltBytes, iterations, hash:'SHA-256' },
     baseKey,
     { name:'AES-GCM', length:256 },
     false,

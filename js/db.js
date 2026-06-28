@@ -2,12 +2,13 @@
 // in IndexedDB). The whole DB is decrypted into memory on unlock and re-encrypted
 // on every save. Fine for personal-scale data (thousands of rows).
 
-import { deriveKey, randomBytes, encryptBytes, decryptBytes, makeVerifier, checkVerifier } from './crypto.js';
+import { deriveKey, randomBytes, encryptBytes, decryptBytes, makeVerifier, checkVerifier, DEFAULT_ITERATIONS } from './crypto.js';
 import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
 let db = null;      // current Database
@@ -62,13 +63,14 @@ async function ensureSql(){
 export async function createVault(passphrase){
   await ensureSql();
   const salt = randomBytes(16);
-  const key = await deriveKey(passphrase, salt);
+  const iterations = DEFAULT_ITERATIONS;
+  const key = await deriveKey(passphrase, salt, iterations);
   db = new SQL.Database();
   createSchema();
   seed();
   const blob = await encryptBytes(key, db.export());
   const verifier = await makeVerifier(key);
-  await idbSetMany([['salt', salt], ['verifier', verifier], ['db', blob]]);
+  await idbSetMany([['salt', salt], ['kdf', { iterations }], ['verifier', verifier], ['db', blob]]);
   cryptoKey = key;
 }
 
@@ -78,13 +80,16 @@ export async function unlock(passphrase){
   const salt = await idbGet('salt');
   const verifier = await idbGet('verifier');
   if(!salt || !verifier) return false;
-  const key = await deriveKey(passphrase, salt);
+  const kdf = await idbGet('kdf');
+  const iterations = (kdf && kdf.iterations) || LEGACY_ITERATIONS;
+  const key = await deriveKey(passphrase, salt, iterations);
   if(!await checkVerifier(key, verifier)) return false;
   cryptoKey = key;
   const blob = await idbGet('db');
   db = blob ? new SQL.Database(await decryptBytes(cryptoKey, blob)) : new SQL.Database();
   if(!blob){ createSchema(); seed(); await save(); }
   migrate();
+  await save();
   return true;
 }
 
@@ -100,12 +105,13 @@ export async function save(){
 export async function changePassphrase(newPass){
   if(!db) return;
   const salt = randomBytes(16);
-  const key = await deriveKey(newPass, salt);
-  // Re-encrypt the DB under the new key and write salt+verifier+db atomically,
-  // so a mid-write failure can never leave salt/verifier and db keyed differently.
+  const iterations = DEFAULT_ITERATIONS;
+  const key = await deriveKey(newPass, salt, iterations);
+  // Re-encrypt the DB under the new key and write salt+kdf+verifier+db atomically,
+  // so a mid-write failure can never leave them keyed differently.
   const blob = await encryptBytes(key, db.export());
   const verifier = await makeVerifier(key);
-  await idbSetMany([['salt', salt], ['verifier', verifier], ['db', blob]]);
+  await idbSetMany([['salt', salt], ['kdf', { iterations }], ['verifier', verifier], ['db', blob]]);
   cryptoKey = key;
 }
 
@@ -120,7 +126,10 @@ function createSchema(){
       archived INTEGER DEFAULT 0);
     CREATE TABLE categories(
       id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
-      kind TEXT NOT NULL, color TEXT, icon TEXT);
+      kind TEXT NOT NULL, color TEXT, icon TEXT, grp TEXT, archived INTEGER DEFAULT 0);
+    CREATE TABLE budgets(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER UNIQUE,
+      amount REAL NOT NULL, period TEXT DEFAULT 'monthly');
     CREATE TABLE rules(
       id INTEGER PRIMARY KEY AUTOINCREMENT, match TEXT NOT NULL,
       category_id INTEGER NOT NULL, priority INTEGER DEFAULT 5);
@@ -139,8 +148,8 @@ function createSchema(){
 
 function seed(){
   const catId = {};
-  for(const [name, kind, color, icon] of SEED_CATEGORIES){
-    db.run(`INSERT INTO categories(name,kind,color,icon) VALUES(?,?,?,?)`, [name,kind,color,icon]);
+  for(const [name, kind, color, icon, grp] of SEED_CATEGORIES){
+    db.run(`INSERT INTO categories(name,kind,color,icon,grp) VALUES(?,?,?,?,?)`, [name,kind,color,icon,grp||null]);
     catId[name] = lastId();
   }
   for(const [match, catName, priority] of SEED_RULES){
@@ -152,7 +161,32 @@ function seed(){
     ['Keš (slamarica)','cash','RSD','#64748b']);
 }
 
-function migrate(){ /* future schema upgrades keyed on meta.schema_version */ }
+function migrate(){
+  const row = get(`SELECT value FROM meta WHERE key='schema_version'`);
+  let v = row ? +row.value : 1;
+  if(v < 2){
+    try { db.run(`ALTER TABLE categories ADD COLUMN grp TEXT`); } catch {}
+    try { db.run(`ALTER TABLE categories ADD COLUMN archived INTEGER DEFAULT 0`); } catch {}
+    db.run(`CREATE TABLE IF NOT EXISTS budgets(id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category_id INTEGER UNIQUE, amount REAL NOT NULL, period TEXT DEFAULT 'monthly')`);
+    // backfill default groups by category name
+    for(const [name,,,, grp] of SEED_CATEGORIES){
+      if(grp) db.run(`UPDATE categories SET grp=? WHERE name=? AND (grp IS NULL OR grp='')`, [grp, name]);
+    }
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','2') ON CONFLICT(key) DO UPDATE SET value='2'`);
+    v = 2;
+  }
+}
+
+// ---------- settings (meta key/value) ----------
+export function getSetting(key, def=null){
+  const r = get(`SELECT value FROM meta WHERE key=?`, [key]);
+  return r ? r.value : def;
+}
+export function setSetting(key, value){
+  db.run(`INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=?`,
+    [key, String(value), String(value)]);
+}
 
 // ---------- query helpers ----------
 export function all(sql, params=[]){
