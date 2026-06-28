@@ -7,12 +7,16 @@ import { cleanMerchant, categorize } from './categorize.js';
 export const getAccounts = (incl=false) =>
   db.all(`SELECT * FROM accounts ${incl?'':'WHERE archived=0'} ORDER BY type, name`);
 export const getCategories = () => db.all(`SELECT * FROM categories ORDER BY kind, name`);
-export const getRules = () => db.all(`SELECT * FROM rules`);
+export const getRules = () => db.all(`SELECT r.*, c.kind FROM rules r JOIN categories c ON c.id=r.category_id`);
 export const catMap = () => { const m={}; for(const c of getCategories()) m[c.name]=c.id; return m; };
 
 export function findOrCreateAccountByNumber(number, { bank, currency, name }){
   if(number){
     const a = db.get(`SELECT * FROM accounts WHERE account_number=?`, [number]);
+    if(a) return a;
+  } else {
+    // no parseable account number — match by the deterministic name to avoid duplicates
+    const a = db.get(`SELECT * FROM accounts WHERE account_number IS NULL AND name=?`, [name]);
     if(a) return a;
   }
   db.run(`INSERT INTO accounts(name,type,bank,account_number,currency,color) VALUES(?,?,?,?,?,?)`,
@@ -60,7 +64,9 @@ export function importStatement(parsed, fileName){
   const dates = parsed.transactions.map(t=>t.bookingDate).sort();
   for(const t of parsed.transactions){
     const merchant = cleanMerchant(t.counterparty, t.description);
-    const dedupe = `${parsed.account||acct.id}|${t.ref||''}|${t.bookingDate}|${t.signed}`;
+    // include running balance: it is unique per row, so two same-day same-amount
+    // transactions with no reference number no longer collide and get dropped.
+    const dedupe = `${parsed.account||acct.id}|${t.ref||''}|${t.bookingDate}|${t.signed}|${t.balance??''}`;
     const r = insertTransaction({
       account_id: acct.id, date: t.bookingDate, amount: t.signed, currency: t.currency||acct.currency,
       description: t.description, counterparty: t.counterparty, merchant,
