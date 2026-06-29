@@ -377,7 +377,7 @@ function renderTx(s){
         <label class="fld">Max iznos<input type="number" data-filter="max" value="${txFilter.max||''}"></label></div>
       <button class="ghost" data-action="clear-filters">Očisti sve filtere</button>
     </section>`:''}
-    <div class="tx-summary"><span>${totalN>rows.length?`${rows.length} od ${totalN}`:`${totalN} transakcija`}</span><span class="pos">+${fmtN(sumIn)}</span><span class="neg">−${fmtN(sumOut)}</span></div>
+    <div class="tx-summary"><span>${totalN>rows.length?`${rows.length} od ${totalN}`:`${totalN} transakcija`}</span><span class="pos">+${fmtN(sumIn)}</span><span class="neg">−${fmtN(sumOut)}</span>${totalN>0?`<button class="ghost sm" data-action="del-filtered">🗑 ${totalN}</button>`:''}</div>
     <div class="tx-list">
       ${rows.map(r=>{
         const a=acctMap[r.account_id], c=catMapById[r.category_id]||{};
@@ -518,9 +518,10 @@ function importOverlap(parsed){
 
 async function confirmImport(){
   let totalIns=0, totalSkip=0;
+  const batch = todayLocal()+'T'+new Date().toTimeString().slice(0,8);  // local stamp, shared per import run
   for(const p of pendingImports){
     if(!p.ok) continue;
-    const r = repo.importStatement(p.parsed, p.file);
+    const r = repo.importStatement(p.parsed, p.file, batch);
     totalIns += r.inserted; totalSkip += r.skipped;
   }
   await persist();
@@ -572,6 +573,7 @@ const ACCENTS = ['#3b82f6','#22c55e','#8b5cf6','#f97316','#ec4899','#14b8a6'];
 function renderSettings(s){
   const cats = repo.getCategories();
   const rules = db.all(`SELECT r.*, c.name AS cat, c.icon FROM rules r JOIN categories c ON c.id=r.category_id ORDER BY r.priority, r.match`);
+  const batches = repo.getImportBatches();
   const al = autolockMin();
   s.innerHTML = `
     <section class="card">
@@ -586,6 +588,14 @@ function renderSettings(s){
         <button data-action="export-csv">📄 CSV</button>
       </div>
     </section>
+    ${batches.length?`<section class="card">
+      <h3>Uvozi <small>${batches.length}</small></h3>
+      <p class="muted small">Obriši ceo uvoz odjednom (sve stavke iz tog fajla).</p>
+      <div class="rules">
+        ${batches.map(b=>{ const fn=b.batch.split('|')[1]||b.batch; const st=(b.batch.split('|')[0]||'').slice(0,16).replace('T',' ');
+          return `<div class="rule"><div style="flex:1;min-width:0">${esc(fn)}<small> ${b.mn}–${b.mx} · ${b.n} stavki${st?' · '+st:''}</small></div><span class="del" data-action="del-batch" data-batch="${esc(b.batch)}">🗑</span></div>`; }).join('')}
+      </div>
+    </section>`:''}
     <section class="card">
       <h3>Kategorije <small>${cats.length}</small></h3>
       <p class="muted small">Dodirni kategoriju za izmenu (ime, boja, grupa) ili brisanje.</p>
@@ -937,6 +947,20 @@ async function onClick(e){
   else if(act==='kpi-spend'){ statsModal('spend'); }
   else if(act==='kpi-save'){ statsModal('save'); }
   else if(act==='kpi-avg'){ statsModal('avg'); }
+  else if(act==='del-filtered'){
+    const { whereSql, params } = buildTxWhere();
+    const n = repo.countWhere(whereSql, params);
+    if(n>0 && await confirmModal(`Obrisati ${n} prikazanih transakcija? Ovo se ne može poništiti.`, `Obriši ${n}`)){
+      repo.deleteWhere(whereSql, params); await persist(); toast(`Obrisano ${n} transakcija.`); render();
+    }
+  }
+  else if(act==='del-batch'){
+    const batch = a.dataset.batch; const fn = (batch.split('|')[1]||batch);
+    const n = repo.countWhere('WHERE import_batch=?', [batch]);
+    if(await confirmModal(`Obrisati ceo uvoz „${fn}" (${n} stavki)? Ovo se ne može poništiti.`, `Obriši ${n}`)){
+      repo.deleteByBatch(batch); await persist(); toast(`Uvoz obrisan (${n}).`); render();
+    }
+  }
   else if(act==='toggle-filters'){ showFilters=!showFilters; render(); }
   else if(act==='clear-filters'){ clearFilters(); showFilters=false; render(); }
   else if(act==='edit-category'){ categoryEditModal(+a.dataset.id); }

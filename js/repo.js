@@ -105,17 +105,19 @@ export function insertTransaction(tx, rules){
     if(catId == null) catId = defaultCategoryId(isCredit);
   }
   db.run(`INSERT INTO transactions
-    (account_id,date,amount,currency,description,counterparty,merchant,category_id,ref,fee,fx,balance,source,note,dedupe_key,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    (account_id,date,amount,currency,description,counterparty,merchant,category_id,ref,fee,fx,balance,source,note,dedupe_key,import_batch,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [tx.account_id, tx.date, tx.amount, tx.currency||'RSD', tx.description||null, tx.counterparty||null,
      tx.merchant||null, catId, tx.ref||null, tx.fee||0, tx.fx?JSON.stringify(tx.fx):null,
-     tx.balance??null, tx.source||'manual', tx.note||null, tx.dedupe_key||null, new Date().toISOString()]);
+     tx.balance??null, tx.source||'manual', tx.note||null, tx.dedupe_key||null, tx.import_batch||null, new Date().toISOString()]);
   return 'inserted';
 }
 
-// Import a parsed Banca Intesa statement (output of parseIntesaPages).
-export function importStatement(parsed, fileName){
+// Import a parsed Banca Intesa statement. `batch` tags every inserted row so a
+// whole import can later be deleted as a unit.
+export function importStatement(parsed, fileName, batch){
   const rules = getRules();
+  const importBatch = `${batch||new Date().toISOString()}|${fileName||''}`;
   const acct = findOrCreateAccountByNumber(parsed.account, {
     bank: 'Banca Intesa', currency: parsed.currency || 'RSD',
     name: `Banca Intesa ${parsed.currency==='EUR'?'devizni':'tekući'} ···${(parsed.account||'').slice(-4)}`,
@@ -130,7 +132,7 @@ export function importStatement(parsed, fileName){
     const r = insertTransaction({
       account_id: acct.id, date: t.bookingDate, amount: t.signed, currency: t.currency||acct.currency,
       description: t.description, counterparty: t.counterparty, merchant,
-      ref: t.ref, fee: t.fee, fx: t.fx, balance: t.balance, source: 'pdf', dedupe_key: dedupe,
+      ref: t.ref, fee: t.fee, fx: t.fx, balance: t.balance, source: 'pdf', dedupe_key: dedupe, import_batch: importBatch,
     }, rules);
     if(r==='inserted') inserted++; else skipped++;
   }
@@ -155,6 +157,14 @@ export function addManual({account_id, date, amount, kind, category_id, descript
 }
 
 export function deleteTransaction(id){ db.run(`DELETE FROM transactions WHERE id=?`, [id]); }
+// Bulk delete by an arbitrary WHERE (built by the UI from the active filters).
+export function countWhere(whereSql, params){ return db.get(`SELECT COUNT(*) AS c FROM transactions ${whereSql}`, params).c; }
+export function deleteWhere(whereSql, params){ db.run(`DELETE FROM transactions ${whereSql}`, params); }
+// Import batches: list and delete a whole import.
+export const getImportBatches = () => db.all(`
+  SELECT import_batch AS batch, COUNT(*) AS n, MIN(date) AS mn, MAX(date) AS mx
+  FROM transactions WHERE import_batch IS NOT NULL GROUP BY import_batch ORDER BY mx DESC, batch DESC`);
+export function deleteByBatch(batch){ db.run(`DELETE FROM transactions WHERE import_batch=?`, [batch]); }
 export function setCategory(txId, catId){ db.run(`UPDATE transactions SET category_id=? WHERE id=?`, [catId, txId]); }
 
 export function addAccount({name,type,bank,currency,opening_balance,color}){

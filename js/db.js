@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -154,7 +154,7 @@ function createSchema(){
       date TEXT NOT NULL, amount REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'RSD',
       description TEXT, counterparty TEXT, merchant TEXT, category_id INTEGER,
       ref TEXT, fee REAL DEFAULT 0, fx TEXT, balance REAL,
-      source TEXT DEFAULT 'manual', note TEXT, dedupe_key TEXT, created_at TEXT);
+      source TEXT DEFAULT 'manual', note TEXT, dedupe_key TEXT, import_batch TEXT, created_at TEXT);
     CREATE UNIQUE INDEX idx_tx_dedupe ON transactions(dedupe_key) WHERE dedupe_key IS NOT NULL;
     CREATE INDEX idx_tx_date ON transactions(date);
     CREATE INDEX idx_tx_acct ON transactions(account_id);
@@ -191,6 +191,11 @@ function migrate(){
     }
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','2') ON CONFLICT(key) DO UPDATE SET value='2'`);
     v = 2;
+  }
+  if(v < 3){
+    try { db.run(`ALTER TABLE transactions ADD COLUMN import_batch TEXT`); } catch {}
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','3') ON CONFLICT(key) DO UPDATE SET value='3'`);
+    v = 3;
   }
 }
 
