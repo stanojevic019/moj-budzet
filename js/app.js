@@ -17,6 +17,7 @@ let budgetMonth = null;    // budgets view month (separate from tx filterMonth)
 let showFilters = false;   // advanced filter panel open
 let lockTimer = null;      // auto-lock timer
 let swReg = null;          // service-worker registration
+let backArmed = false;     // history buffer for Android back button
 
 const todayISO = () => todayLocal();
 
@@ -65,6 +66,7 @@ function toast(msg, ok=true){
 async function boot(){
   registerSW();
   app.addEventListener('click', onClick); // bound once (not per unlock)
+  window.addEventListener('popstate', onBack);
   ['click','keydown','touchstart','scroll'].forEach(ev=>document.addEventListener(ev, resetAutoLock, {passive:true}));
   const exists = await db.vaultExists();
   renderLock(exists);
@@ -145,6 +147,19 @@ function render(){
   else if(view==='accounts') renderAccounts(s);
   else if(view==='settings') renderSettings(s);
   s.scrollTop = 0;
+  ensureBackArmed();
+}
+
+// ---------- Android back button: step back / close modal instead of exiting ----------
+function ensureBackArmed(){
+  if(db.isOpen() && !backArmed){ try { history.pushState({ mb:1 }, ''); } catch {} backArmed = true; }
+}
+function onBack(){
+  backArmed = false;                                  // our buffer entry was just consumed
+  const m = document.querySelector('.modal-bg');
+  if(m){ m.remove(); ensureBackArmed(); return; }     // 1) back closes an open modal
+  if(db.isOpen() && view!=='dashboard'){ drillCat=null; showFilters=false; view='dashboard'; render(); return; } // 2) → home (render re-arms)
+  if(db.isOpen()) toast('Nazad još jednom za izlaz.'); // 3) on home: next back exits the app
 }
 
 // =================================================================== DASHBOARD

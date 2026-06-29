@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -196,6 +196,16 @@ function migrate(){
     try { db.run(`ALTER TABLE transactions ADD COLUMN import_batch TEXT`); } catch {}
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','3') ON CONFLICT(key) DO UPDATE SET value='3'`);
     v = 3;
+  }
+  if(v < 4){
+    // add any newly-introduced seed categories the vault doesn't have yet (by name).
+    // one-time, so categories the user deleted are not resurrected.
+    for(const [name, kind, color, icon, grp] of SEED_CATEGORIES){
+      if(!get(`SELECT id FROM categories WHERE name=?`, [name]))
+        db.run(`INSERT INTO categories(name,kind,color,icon,grp) VALUES(?,?,?,?,?)`, [name,kind,color,icon,grp||null]);
+    }
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value='4'`);
+    v = 4;
   }
 }
 
