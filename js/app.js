@@ -627,7 +627,8 @@ function renderSettings(s){
         <select id="rCat">${cats.map(c=>`<option value="${c.id}">${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
         <button class="primary" data-action="add-rule">Dodaj</button>
       </div>
-      <button data-action="recat">↻ Primeni pravila na nekategorisane</button>
+      <button data-action="recat">↻ Primeni pravila i učenje na nekategorisane</button>
+      <div class="muted small" style="margin-top:8px">🧠 Pametna kategorizacija uči iz tvojih izmena. Naučeno trgovaca: <b>${repo.learnedCount()}</b>. Kad god ručno promeniš kategoriju, aplikacija je zapamti za ubuduće.</div>
       <div class="rules">
         ${rules.map(r=>`<div class="rule"><code>${esc(r.match)}</code> → ${esc(r.icon+' '+r.cat)} <span class="del" data-action="del-rule" data-id="${r.id}">✕</span></div>`).join('')}
       </div>
