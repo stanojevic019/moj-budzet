@@ -173,3 +173,65 @@ function reconstructLines(items, yTol=3){
 
 function toISO(d){ const [dd,mm,yy]=d.split('.'); return `${yy}-${mm}-${dd}`; }
 function round2(n){ return Math.round(n*100)/100; }
+
+// ---------------------------------------------------------------------------
+// Second Banca Intesa format: "RAČUN TRANSAKCIJE" (Mobi app export).
+// Columns by X: DATUM(~23) · TIP(~84) · OPIS(~197) · IZNOS(~483, "- 1.020,00 RSD").
+// Signs are explicit (+/−); there is NO running balance or opening balance.
+const AMT = /([+\-−])\s*([\d.]+,\d{2})\s*([A-Z]{3})?/;
+export function parseIntesaActivity(pages){
+  const all = [];
+  pages.forEach((pg, pi) => pg.items.forEach(it => {
+    if(it.str && it.str.trim()) all.push({ str: it.str.trim(), x: it.x, y: it.y, w: it.w||0, pi });
+  }));
+  let account = '';
+  for(const i of all){ if(i.y > 600 && /^\d{16,20}$/.test(i.str)){ account = i.str; break; } }
+
+  // date anchors = dd.mm.yyyy in the leftmost column
+  const dateItems = all.filter(i => i.x < 70 && DATE.test(i.str)).sort((a,b)=> a.pi-b.pi || b.y-a.y);
+  if(!dateItems.length) return { account, currency:'RSD', opening:null, transactions:[] };
+  const byPage = {};
+  dateItems.forEach(d => (byPage[d.pi] || (byPage[d.pi]=[])).push(d));
+  const assign = (i) => { const ds = byPage[i.pi]||[]; let best=null, bd=1e9;
+    for(const d of ds){ const dy=Math.abs(d.y-i.y); if(dy<bd){ bd=dy; best=d; } } return best; };
+
+  // per-page header Y (the "DATUM" column header) — ignore everything at/above it
+  // (title, OD/DO dates, column labels) and the page-number footer at the bottom.
+  const headerY = {};
+  for(const i of all){ if(i.str==='DATUM' && i.x<60) headerY[i.pi] = i.y; }
+  const groups = new Map(); dateItems.forEach(d=>groups.set(d, []));
+  for(const i of all){
+    if(i.x < 70 && DATE.test(i.str)) continue;          // the date itself
+    const hy = headerY[i.pi];
+    if(hy!=null && i.y >= hy-2) continue;               // title / OD-DO / column header
+    if(i.y < 30) continue;                              // page-number footer
+    const d = assign(i); if(d) groups.get(d).push(i);
+  }
+
+  const txns = []; const ccyCount = {};
+  for(const d of dateItems){
+    const band = groups.get(d);
+    const colText = (lo,hi) => band.filter(i=>i.x>=lo && i.x<hi)
+      .sort((a,b)=> b.y-a.y || a.x-b.x).map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+    const type = colText(70,190);
+    const opis = colText(190,470);
+    const amtStr = band.filter(i=>i.x>=470).map(i=>i.str).join(' ');
+    const m = amtStr.match(AMT);
+    if(!m) continue;
+    const sign = (m[1]==='-' || m[1]==='−') ? -1 : 1;
+    const value = num(m[2]);
+    const currency = m[3] || 'RSD';
+    ccyCount[currency] = (ccyCount[currency]||0)+1;
+    txns.push({
+      bookingDate: toISO(d.str),
+      description: opis, counterparty: '', type,
+      amount: round2(value), signed: round2(sign*value),
+      sign: sign>0 ? 'credit' : 'debit',
+      currency,
+      ref: (type+' '+opis).replace(/\s+/g,' ').slice(0,32),  // stable-ish key (no ref/balance in this format)
+      fee: 0, fx: null, balance: null,
+    });
+  }
+  const currency = Object.entries(ccyCount).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'RSD';
+  return { account, currency, opening:null, transactions: txns };
+}
