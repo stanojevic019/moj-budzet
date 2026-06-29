@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -225,6 +225,46 @@ function migrate(){
     db.run(`CREATE TABLE IF NOT EXISTS learned(key TEXT PRIMARY KEY, category_id INTEGER, n INTEGER DEFAULT 1)`);
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','6') ON CONFLICT(key) DO UPDATE SET value='6'`);
     v = 6;
+  }
+  if(v < 7){
+    // curate categories: merge redundant ones (reassigning tx/budgets/rules/learned),
+    // rename for clarity, drop a niche empty one. Data-safe — nothing is lost.
+    const idOf = (name) => { const r = get(`SELECT id FROM categories WHERE name=?`, [name]); return r ? r.id : null; };
+    const mergeCat = (srcName, dstName) => {
+      const src = idOf(srcName), dst = idOf(dstName);
+      if(src==null || dst==null || src===dst) return;
+      db.run(`UPDATE transactions SET category_id=? WHERE category_id=?`, [dst, src]);
+      db.run(`UPDATE learned SET category_id=? WHERE category_id=?`, [dst, src]);
+      db.run(`UPDATE rules SET category_id=? WHERE category_id=?`, [dst, src]);
+      const hasSrcB = get(`SELECT id FROM budgets WHERE category_id=?`, [src]);
+      const hasDstB = get(`SELECT id FROM budgets WHERE category_id=?`, [dst]);
+      if(hasSrcB && !hasDstB) db.run(`UPDATE budgets SET category_id=? WHERE category_id=?`, [dst, src]);
+      else if(hasSrcB) db.run(`DELETE FROM budgets WHERE category_id=?`, [src]);
+      db.run(`DELETE FROM categories WHERE id=?`, [src]);
+    };
+    const rename = (oldN, newN, icon) => {
+      const id = idOf(oldN); if(id==null) return;
+      if(idOf(newN)){ mergeCat(oldN, newN); return; }      // target already exists → merge
+      db.run(`UPDATE categories SET name=?, icon=? WHERE id=?`, [newN, icon, id]);
+    };
+    mergeCat('Putarina i parking', 'Gorivo');
+    mergeCat('Prevoz (taksi/gradski)', 'Gorivo');
+    mergeCat('Lepota i nega', 'Drogerija i kozmetika');
+    mergeCat('Osiguranje', 'Porezi i takse');
+    rename('Gorivo', 'Automobil i prevoz', '🚗');
+    rename('Drogerija i kozmetika', 'Lična nega', '🧴');
+    rename('Porezi i takse', 'Obaveze (porezi/osiguranje)', '🏛️');
+    rename('Kuća i domaćinstvo', 'Dom i domaćinstvo', '🏠');
+    // drop niche category only if unused
+    const pets = idOf('Kućni ljubimci');
+    if(pets!=null && get(`SELECT COUNT(*) AS c FROM transactions WHERE category_id=?`, [pets]).c===0
+       && !get(`SELECT id FROM budgets WHERE category_id=?`, [pets])){
+      db.run(`DELETE FROM rules WHERE category_id=?`, [pets]);
+      db.run(`DELETE FROM learned WHERE category_id=?`, [pets]);
+      db.run(`DELETE FROM categories WHERE id=?`, [pets]);
+    }
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','7') ON CONFLICT(key) DO UPDATE SET value='7'`);
+    v = 7;
   }
 }
 
