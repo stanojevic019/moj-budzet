@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -206,6 +206,19 @@ function migrate(){
     }
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value='4'`);
     v = 4;
+  }
+  if(v < 5){
+    // backfill UniCredit-friendly rules (new match-texts; safe — never existed before)
+    const add = [['ODRZAVANJE RACUNA','Bankarske naknade',1],['MOBILNO BANKARSTVO','Bankarske naknade',1],
+      ['INFOSTAN','Računi i režije',2],['EPS AD','Računi i režije',2],['ALIEXPRESS','Šoping',2],
+      ['TEMU','Šoping',2],['UNICEF','Pokloni i donacije',2],['PL:ACC','Interni prenos',2]];
+    for(const [mt, cat, pr] of add){
+      if(get(`SELECT id FROM rules WHERE match=?`, [mt])) continue;
+      const c = get(`SELECT id FROM categories WHERE name=?`, [cat]); if(!c) continue;
+      db.run(`INSERT INTO rules(match,category_id,priority) VALUES(?,?,?)`, [mt, c.id, pr]);
+    }
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','5') ON CONFLICT(key) DO UPDATE SET value='5'`);
+    v = 5;
   }
 }
 

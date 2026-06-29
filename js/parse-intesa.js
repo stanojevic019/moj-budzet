@@ -235,3 +235,61 @@ export function parseIntesaActivity(pages){
   const currency = Object.entries(ccyCount).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'RSD';
   return { account, currency, opening:null, transactions: txns };
 }
+
+// ---------------------------------------------------------------------------
+// UniCredit "LISTA TRANSAKCIJA". Columns by X: Datum(~89) · Iznos(~218, "- 14572.18",
+// dot-decimal, leading '-' = debit) · Detalji(~300-560) · ID transakcije(~576) ·
+// Stanje(~727, running balance). Opening derived from first row's balance.
+const DATE_ISO = /^\d{4}-\d{2}-\d{2}$/;
+const FOOTER_UC = /UniCredit Bank Srbija|tel: \+381/i;
+export function parseUniCredit(pages){
+  const all = [];
+  pages.forEach((pg, pi) => pg.items.forEach(it => {
+    if(it.str && it.str.trim()) all.push({ str: it.str.trim(), x: it.x, y: it.y, w: it.w||0, pi });
+  }));
+  const flat = all.map(i=>i.str).join(' ');
+  const accM = flat.match(/Broj ra.una\s*:?\s*(\d{6,})/i);
+  const curM = flat.match(/Valuta ra.una\s*:?\s*([A-Z]{3})/i);
+  const account = accM ? accM[1] : '';
+  const currency = curM ? curM[1] : 'RSD';
+
+  const headerY = {}, footerY = {};
+  for(const i of all){
+    if(i.str==='Datum' && i.x<130) headerY[i.pi] = i.y;
+    if(FOOTER_UC.test(i.str)) footerY[i.pi] = Math.max(footerY[i.pi] ?? -1, i.y);
+  }
+  const inBody = (i) => (headerY[i.pi]==null || i.y < headerY[i.pi]-2) && (footerY[i.pi]==null || i.y > footerY[i.pi]+2);
+  const dateItems = all.filter(i => i.x<130 && DATE_ISO.test(i.str) && inBody(i)).sort((a,b)=> a.pi-b.pi || b.y-a.y);
+  if(!dateItems.length) return { account, currency, opening:null, transactions:[] };
+
+  const byPage = {}; dateItems.forEach(d => (byPage[d.pi] || (byPage[d.pi]=[])).push(d));
+  const assign = (i) => { const ds=byPage[i.pi]||[]; let best=null,bd=1e9; for(const d of ds){ const dy=Math.abs(d.y-i.y); if(dy<bd){bd=dy;best=d;} } return best; };
+  const groups = new Map(); dateItems.forEach(d=>groups.set(d, []));
+  for(const i of all){
+    if(i.x<130 && DATE_ISO.test(i.str)) continue;
+    if(!inBody(i)) continue;
+    const d = assign(i); if(d) groups.get(d).push(i);
+  }
+  const n = (s) => parseFloat(String(s).replace(/[^\d.]/g,'')) || 0;
+  const txns = [];
+  for(const d of dateItems){
+    const band = groups.get(d);
+    const col = (lo,hi) => band.filter(i=>i.x>=lo && i.x<hi).sort((a,b)=> b.y-a.y || a.x-b.x).map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+    const iznos = band.filter(i=>i.x>=195 && i.x<295).map(i=>i.str).join(' ');
+    if(!iznos.trim()) continue;
+    const sign = /-/.test(iznos) ? -1 : 1;
+    const value = n(iznos);
+    const detalji = col(295,560);
+    const id = band.filter(i=>i.x>=560 && i.x<700).map(i=>i.str).join('');
+    const stanjeStr = band.filter(i=>i.x>=700).map(i=>i.str).join('');
+    txns.push({
+      bookingDate: d.str, description: detalji, counterparty:'',
+      amount: round2(value), signed: round2(sign*value), sign: sign>0?'credit':'debit',
+      currency, ref: id || detalji.slice(0,24), fee:0, fx:null,
+      balance: stanjeStr ? round2(n(stanjeStr)) : null,
+    });
+  }
+  let opening = null;
+  if(txns.length && txns[0].balance != null) opening = round2(txns[0].balance - txns[0].signed);
+  return { account, currency, opening, transactions: txns };
+}

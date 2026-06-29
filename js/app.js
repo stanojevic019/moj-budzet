@@ -536,7 +536,7 @@ async function confirmImport(){
   const batch = todayLocal()+'T'+new Date().toTimeString().slice(0,8);  // local stamp, shared per import run
   for(const p of pendingImports){
     if(!p.ok) continue;
-    const r = repo.importStatement(p.parsed, p.file, batch);
+    const r = repo.importStatement(p.parsed, p.file, batch, p.bank);
     totalIns += r.inserted; totalSkip += r.skipped;
   }
   await persist();
