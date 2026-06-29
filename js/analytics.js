@@ -10,12 +10,12 @@ export const EXCLUDE_INCOME   = ['Menjačnica (devize)','Interni prenos','Transf
 
 // SQL fragment converting `amount`'s currency to RSD. Rates are our own numbers
 // and currency codes are sanitized to A–Z, so inlining is injection-safe.
-export function convExpr(rates){
+export function convExpr(rates, col='currency'){
   const parts = Object.entries(rates||{})
     .filter(([c]) => c !== 'RSD')
     .map(([c,r]) => `WHEN '${String(c).replace(/[^A-Z]/g,'')}' THEN ${Number(r)||1}`)
     .join(' ');
-  return parts ? `(CASE currency ${parts} ELSE 1 END)` : `1`;
+  return parts ? `(CASE ${col} ${parts} ELSE 1 END)` : `1`;
 }
 const toRSD = (amount, currency, rates) => amount * ((rates && rates[currency]) || 1);
 
@@ -181,6 +181,30 @@ export function categoryMovers(curMonth, prevMonth, rates){
   const ids=new Set([...Object.keys(cur), ...Object.keys(prev)]);
   return [...ids].map(id=>({ cat:cats[id]||{name:'?',icon:'',color:'#888'}, cur:cur[id]||0, prev:prev[id]||0, delta:(cur[id]||0)-(prev[id]||0) }))
     .sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
+}
+
+// ---------- per-account stats (in each account's own currency) ----------
+// avgSpend = avg monthly real spending; avgNet = avg monthly savings (real income − real spending).
+export function accountStats(){
+  const accts = db.all(`SELECT id,name,currency,color,type FROM accounts WHERE archived=0`);
+  const cats = catLookup();
+  const exS = new Set(EXCLUDE_SPENDING), exI = new Set(EXCLUDE_INCOME);
+  const rows = db.all(`SELECT account_id, substr(date,1,7) AS m, amount, category_id FROM transactions`);
+  const agg = {};
+  for(const r of rows){
+    const o = agg[r.account_id] || (agg[r.account_id] = { months:new Set(), spend:{}, net:{}, inSum:0, outSum:0 });
+    const nm = cats[r.category_id]?cats[r.category_id].name:'';
+    o.months.add(r.m);
+    if(r.amount < 0){ o.outSum += -r.amount; if(!exS.has(nm)){ o.spend[r.m]=(o.spend[r.m]||0)+(-r.amount); o.net[r.m]=(o.net[r.m]||0)-(-r.amount); } }
+    else { o.inSum += r.amount; if(!exI.has(nm)) o.net[r.m]=(o.net[r.m]||0)+r.amount; }
+  }
+  return accts.map(a=>{
+    const o = agg[a.id];
+    if(!o) return { ...a, months:0, avgSpend:0, avgNet:0, totalIn:0, totalOut:0 };
+    const mc = o.months.size || 1;
+    const sum = obj => Object.values(obj).reduce((s,x)=>s+x,0);
+    return { ...a, months:o.months.size, avgSpend: sum(o.spend)/mc, avgNet: sum(o.net)/mc, totalIn:o.inSum, totalOut:o.outSum };
+  });
 }
 
 export { fmtMonth };

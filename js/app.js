@@ -178,9 +178,9 @@ function renderDashboard(s){
   s.innerHTML = `
     <div class="kpis">
       ${kpi('Neto vrednost', fmt(nw.totalRSD), `${balances.length} računa →`, '', 'data-action="goto" data-view="accounts"')}
-      ${kpi('Potrošnja '+k.current.label, fmt(k.current.spending), k.momSpend==null?'':`${k.momSpend<=0?'📉':'📈'} ${pct(k.momSpend)} vs prošli mesec`, k.momSpend>0?'bad':'good', `data-action="spend-month" data-month="${k.current.month}"`)}
-      ${kpi('Štednja '+k.current.label, fmt(k.current.net), k.savingsRate==null?'':`stopa štednje ${k.savingsRate.toFixed(0)}%`, k.current.net>=0?'good':'bad', 'data-action="goto" data-view="budgets"')}
-      ${kpi('Prosečna potrošnja', fmt(k.avgSpend), `${k.monthsCount} mes. · rezerva ~${runway.toFixed(1)} mes.`, '')}
+      ${kpi('Potrošnja '+k.current.label, fmt(k.current.spending), k.momSpend==null?'rasčlani →':`${k.momSpend<=0?'📉':'📈'} ${pct(k.momSpend)} vs prošli mesec`, k.momSpend>0?'bad':'good', 'data-action="kpi-spend"')}
+      ${kpi('Štednja '+k.current.label, fmt(k.current.net), k.savingsRate==null?'rasčlani →':`stopa štednje ${k.savingsRate.toFixed(0)}%`, k.current.net>=0?'good':'bad', 'data-action="kpi-save"')}
+      ${kpi('Prosečna potrošnja', fmt(k.avgSpend), `${k.monthsCount} mes. · po računu →`, '', 'data-action="kpi-avg"')}
     </div>
 
     ${insights(k, breakdown, recMonthly, proj)}
@@ -381,11 +381,11 @@ function renderTx(s){
     <div class="tx-list">
       ${rows.map(r=>{
         const a=acctMap[r.account_id], c=catMapById[r.category_id]||{};
-        return `<div class="tx" data-txid="${r.id}">
+        return `<div class="tx" data-action="edit-cat" data-txid="${r.id}">
           <div class="tx-ic" style="background:${(c.color||'#888')}22;color:${c.color||'#888'}">${esc(c.icon||'•')}</div>
           <div class="tx-main">
             <div class="tx-t">${esc(r.merchant||r.description||'—')}</div>
-            <div class="tx-s">${r.date} · ${esc(a?a.name:'')} · <span class="tx-cat" data-action="edit-cat" data-txid="${r.id}">${esc(c.name||'—')} ✎</span></div>
+            <div class="tx-s">${r.date} · ${esc(a?a.name:'')} · <span class="tx-cat">${esc(c.name||'—')} ✎</span></div>
           </div>
           <div class="tx-amt ${r.amount<0?'neg':'pos'}">${r.amount<0?'−':'+'}${fmtN(Math.abs(r.amount))}<small>${r.currency}</small></div>
         </div>`;
@@ -497,9 +497,23 @@ function renderPreview(){
         <div><span>Period</span>${dates[0]||'?'} – ${dates[dates.length-1]||'?'}</div>
         <div><span>Prihodi</span><b class="pos">+${fmtN(inc)}</b></div>
         <div><span>Rashodi</span><b>−${fmtN(exp)}</b></div>
-      </div></section>`;
+      </div>${importOverlap(p.parsed)}</section>`;
   }).join('');
   if(ok.length) wrap.innerHTML += `<button class="primary big" data-action="confirm-import">Uvezi ${ok.length} izvod(a)</button>`;
+}
+
+// Warn if this account already has transactions in the statement's date range.
+// Different statement FORMATS (izvod vs transakcije) have different dedupe keys,
+// so they are NOT recognized as duplicates of each other.
+function importOverlap(parsed){
+  if(!parsed.account || !parsed.transactions.length) return '';
+  const acc = db.get(`SELECT id FROM accounts WHERE account_number=?`, [parsed.account]);
+  if(!acc) return '';
+  const dates = parsed.transactions.map(t=>t.bookingDate).sort();
+  const min = dates[0], max = dates[dates.length-1];
+  const r = db.get(`SELECT COUNT(*) AS c FROM transactions WHERE account_id=? AND date>=? AND date<=?`, [acc.id, min, max]);
+  if(r.c > 0) return `<div class="neg small" style="margin-top:8px">⚠ Ovaj račun već ima ${r.c} transakcija u periodu ${min} – ${max}. Različiti formati izvoda se ne prepoznaju kao duplikati — uvoz bi napravio duplikate. Uvezi samo jedan format po periodu.</div>`;
+  return '';
 }
 
 async function confirmImport(){
@@ -519,6 +533,7 @@ async function confirmImport(){
 function renderAccounts(s){
   const balances = an.accountBalances();
   const nw = an.netWorth(rates());
+  const stMap = Object.fromEntries(an.accountStats().map(x=>[x.id,x]));
   // currencies in use (non-RSD) → editable rates; always offer EUR
   const used = [...new Set(balances.map(a=>a.currency))].filter(c=>c!=='RSD');
   if(!used.includes('EUR')) used.unshift('EUR');
@@ -527,15 +542,16 @@ function renderAccounts(s){
       <div class="muted small" style="margin-top:8px">Kursna lista (preračun u RSD):</div>
       ${used.map(c=>`<div class="brow"><span>1 ${c} =</span><input type="number" class="binput" data-rate="${c}" value="${getRate(c)}" step="0.1"> <span style="flex:none">RSD</span></div>`).join('')}
     </section>
-    ${balances.map(a=>`<section class="card acct-card">
+    ${balances.map(a=>{ const st=stMap[a.id]; return `<section class="card acct-card">
       <div class="row-between"><div><b>${esc(a.name)}</b><div class="muted">${a.type==='cash'?'💵 keš':'🏦 banka'} · ${a.currency} · ${a.n} transakcija</div></div>
       <b class="${a.balance<0?'neg':''} big-num">${fmt(a.balance,a.currency)}</b></div>
+      ${st&&st.months?`<div class="muted small" style="margin-top:6px">Ø potrošnja ${fmt(st.avgSpend,a.currency)}/mes · Ø štednja <span class="${st.avgNet<0?'neg':'pos'}">${fmt(st.avgNet,a.currency)}/mes</span></div>`:''}
       <div class="form-row" style="margin-top:10px">
         <button class="ghost" data-action="acct" data-acct="${a.id}">Transakcije</button>
         <button class="ghost" data-action="edit-account" data-id="${a.id}">✎ Izmeni</button>
         <button class="primary" data-action="add-to-acct" data-acct="${a.id}">＋ Dodaj</button>
       </div>
-    </section>`).join('')}
+    </section>`; }).join('')}
     <section class="card">
       <h3>Dodaj račun</h3>
       <input id="naName" placeholder="Naziv (npr. Banka 2 – tekući)" />
@@ -797,6 +813,54 @@ function accountEditModal(id){
     repo.deleteAccount(id); await persist(); m.remove(); toast('Račun obrisan.'); render(); } };
 }
 
+// Per-account "real spending" for a month (RSD base, excludes transfers/cash/FX/principal).
+function acctSpendRows(month, rate){
+  const conv = an.convExpr(rate, 't.currency');   // accounts also has `currency` → qualify
+  const excl = an.EXCLUDE_SPENDING.map(n=>`'${n}'`).join(',');
+  const rows = db.all(`SELECT a.id,a.name, COALESCE(SUM(ABS(t.amount)*${conv}),0) AS tot
+    FROM accounts a JOIN transactions t ON t.account_id=a.id JOIN categories c ON c.id=t.category_id
+    WHERE a.archived=0 AND t.amount<0 AND substr(t.date,1,7)=? AND c.name NOT IN (${excl})
+    GROUP BY a.id HAVING tot>0 ORDER BY tot DESC`, [month]);
+  return rows.map(r=>`<div class="rec-row" data-action="acct" data-acct="${r.id}"><div>${esc(r.name)}</div><b>${fmt(r.tot)}</b></div>`).join('')
+    || '<div class="muted small">—</div>';
+}
+// Dashboard KPI breakdown (decompose a headline number, like net worth → accounts).
+function statsModal(metric){
+  const rate = rates();
+  const k = an.kpis(rate); if(!k) return;
+  const month = k.current.month, label = k.current.label;
+  const exSet = new Set(an.EXCLUDE_SPENDING);
+  let title='', body='';
+  if(metric==='avg'){
+    title = 'Prosečno mesečno — po računu';
+    const st = an.accountStats().filter(a=>a.months>0);
+    body = (st.map(a=>`<div class="rec-row" data-action="acct" data-acct="${a.id}">
+        <div>${esc(a.name)}<small>${a.months} mes.</small></div>
+        <div style="text-align:right"><b>${fmt(a.avgSpend,a.currency)}</b><br><small>štednja <span class="${a.avgNet<0?'neg':'pos'}">${fmt(a.avgNet,a.currency)}</span></small></div>
+      </div>`).join('') || '<div class="muted small">Nema podataka.</div>')
+      + `<div class="muted small" style="margin-top:8px">Ukupno (RSD): Ø potrošnja ${fmt(k.avgSpend)} · Ø štednja ${fmt(k.avgInc-k.avgSpend)} /mes</div>`;
+  } else if(metric==='spend'){
+    title = 'Potrošnja '+label;
+    const cats = an.categoryBreakdown(month,'expense',rate).filter(c=>!exSet.has(c.name)).slice(0,12);
+    body = `<div class="muted small">Po kategoriji</div>`
+      + (cats.map(c=>`<div class="rec-row" data-action="drill" data-cat="${c.id}"><div>${esc(c.icon)} ${esc(c.name)}</div><b>${fmt(c.total)}</b></div>`).join('') || '<div class="muted small">—</div>')
+      + `<div class="muted small" style="margin-top:10px">Po računu</div>` + acctSpendRows(month, rate);
+  } else { // save
+    title = 'Štednja '+label;
+    body = `<div class="rec-row"><div>Prihodi (realni)</div><b class="pos">+${fmtN(k.current.realIncome)}</b></div>
+            <div class="rec-row"><div>Rashodi (potrošnja)</div><b class="neg">−${fmtN(k.current.spending)}</b></div>
+            <div class="rec-row" style="border-top:1px solid var(--line)"><div><b>Štednja</b> ${k.savingsRate!=null?`(${k.savingsRate.toFixed(0)}%)`:''}</div><b class="${k.current.net<0?'neg':'pos'}">${fmtN(k.current.net)}</b></div>`;
+  }
+  const m = modal(`<h3>${title}</h3>${body}<div class="form-row" style="margin-top:12px"><button class="ghost" data-close style="flex:1">Zatvori</button></div>`);
+  m.querySelector('[data-close]').onclick=()=>m.remove();
+  m.addEventListener('click', e=>{
+    if(e.target.closest('[data-close]')) return;
+    const el=e.target.closest('[data-action]'); if(!el) return;
+    if(el.dataset.action==='drill' && el.dataset.cat){ clearFilters(); txFilter.category=+el.dataset.cat; view='tx'; m.remove(); render(); }
+    else if(el.dataset.action==='acct'){ clearFilters(); txFilter.account=+el.dataset.acct; view='tx'; m.remove(); render(); }
+  });
+}
+
 function wipeAllModal(){
   const m = modal(`<h3>⚠️ Obriši sve podatke</h3>
     <div class="muted small">Ovo trajno briše ceo sef sa ovog uređaja: sve transakcije, račune, budžete, kategorije i podešavanja. <b>Ne može se poništiti.</b></div>
@@ -870,6 +934,9 @@ async function onClick(e){
   else if(act==='edit-account'){ accountEditModal(+a.dataset.id); }
   else if(act==='wipe-all'){ wipeAllModal(); }
   else if(act==='spend-month'){ clearFilters(); filterMonth=a.dataset.month; txFilter.type='expense'; view='tx'; render(); }
+  else if(act==='kpi-spend'){ statsModal('spend'); }
+  else if(act==='kpi-save'){ statsModal('save'); }
+  else if(act==='kpi-avg'){ statsModal('avg'); }
   else if(act==='toggle-filters'){ showFilters=!showFilters; render(); }
   else if(act==='clear-filters'){ clearFilters(); showFilters=false; render(); }
   else if(act==='edit-category'){ categoryEditModal(+a.dataset.id); }
