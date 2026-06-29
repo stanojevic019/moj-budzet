@@ -262,13 +262,15 @@ export function parseUniCredit(pages){
   const dateItems = all.filter(i => i.x<130 && DATE_ISO.test(i.str) && inBody(i)).sort((a,b)=> a.pi-b.pi || b.y-a.y);
   if(!dateItems.length) return { account, currency, opening:null, transactions:[] };
 
-  const byPage = {}; dateItems.forEach(d => (byPage[d.pi] || (byPage[d.pi]=[])).push(d));
-  const assign = (i) => { const ds=byPage[i.pi]||[]; let best=null,bd=1e9; for(const d of ds){ const dy=Math.abs(d.y-i.y); if(dy<bd){bd=dy;best=d;} } return best; };
+  // Walk items in reading order (page→top→bottom, date-column first on a row); each
+  // item belongs to the most recent date seen. This keeps wrapped detalji lines with
+  // their own row AND carries a row that continues onto the next page.
   const groups = new Map(); dateItems.forEach(d=>groups.set(d, []));
-  for(const i of all){
-    if(i.x<130 && DATE_ISO.test(i.str)) continue;
-    if(!inBody(i)) continue;
-    const d = assign(i); if(d) groups.get(d).push(i);
+  const ordered = all.filter(inBody).sort((a,b)=> a.pi-b.pi || b.y-a.y || a.x-b.x);
+  let cur = null;
+  for(const i of ordered){
+    if(i.x<130 && DATE_ISO.test(i.str)){ cur = i; continue; }
+    if(cur && groups.has(cur)) groups.get(cur).push(i);
   }
   const n = (s) => parseFloat(String(s).replace(/[^\d.]/g,'')) || 0;
   const txns = [];
