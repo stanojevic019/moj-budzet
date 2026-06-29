@@ -171,6 +171,8 @@ code{background:var(--bg2); padding:2px 7px; border-radius:6px; font-size:.85em}
 .kpi[data-action]:active,.acct-row[data-action]:active,.rec-row[data-action]:active,.cl[data-action]:active{opacity:.55}
 .acct-row[data-action]::after,.rec-row[data-action]::after{content:'›'; color:var(--muted); font-size:17px; margin-left:2px; flex:none}
 
+.card.danger{border-color:#5e1b1b}
+
 /* hide-amounts privacy mode */
 .hide-amounts .kv,.hide-amounts .tx-amt,.hide-amounts .big-num,.hide-amounts .acct-row b,
 .hide-amounts .cl b,.hide-amounts .tx-summary .pos,.hide-amounts .tx-summary .neg,

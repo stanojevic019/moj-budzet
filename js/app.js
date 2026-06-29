@@ -607,6 +607,11 @@ function renderSettings(s){
       <button data-action="change-pass">Promeni lozinku</button>
       <button class="ghost" data-action="lock">🔒 Zaključaj sada</button>
     </section>
+    <section class="card danger">
+      <h3>⚠️ Opasna zona</h3>
+      <p class="muted small">Trajno briše sve podatke (transakcije, račune, budžete, podešavanja) sa ovog uređaja. Preporuka: prvo izvezi backup (Excel).</p>
+      <button class="del-tx" data-action="wipe-all" style="width:100%">🗑 Obriši sve podatke</button>
+    </section>
     <section class="card muted small">
       Moj Budžet · podaci su šifrovani (AES-256-GCM, PBKDF2 ${(600000).toLocaleString('sr-RS')} iteracija) i čuvaju se samo na ovom uređaju. Bez interneta i bez bankarske veze.
     </section>`;
@@ -779,6 +784,20 @@ function accountEditModal(id){
     repo.deleteAccount(id); await persist(); m.remove(); toast('Račun obrisan.'); render(); } };
 }
 
+function wipeAllModal(){
+  const m = modal(`<h3>⚠️ Obriši sve podatke</h3>
+    <div class="muted small">Ovo trajno briše ceo sef sa ovog uređaja: sve transakcije, račune, budžete, kategorije i podešavanja. <b>Ne može se poništiti.</b></div>
+    <p class="muted small" style="margin-top:8px">Za potvrdu upiši <b>OBRIŠI</b>:</p>
+    <input id="wipeC" placeholder="OBRIŠI" autocapitalize="characters" autocomplete="off" />
+    <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="del-tx" id="wipeGo" style="flex:1">Obriši sve</button></div>`);
+  m.querySelector('[data-close]').onclick=()=>m.remove();
+  m.querySelector('#wipeGo').onclick=async()=>{
+    if(m.querySelector('#wipeC').value.trim().toUpperCase()!=='OBRIŠI'){ toast('Upiši OBRIŠI za potvrdu.',false); return; }
+    await db.wipeVault(); location.reload();
+  };
+  m.querySelector('#wipeC').focus();
+}
+
 // ---------- auto-lock ----------
 function resetAutoLock(){
   if(lockTimer){ clearTimeout(lockTimer); lockTimer=null; }
@@ -830,6 +849,7 @@ async function onClick(e){
   else if(act==='merch'){ clearFilters(); txFilter.q=a.dataset.merch; view='tx'; render(); }
   else if(act==='add-to-acct'){ addManualModal({ accountId:+a.dataset.acct }); }
   else if(act==='edit-account'){ accountEditModal(+a.dataset.id); }
+  else if(act==='wipe-all'){ wipeAllModal(); }
   else if(act==='spend-month'){ clearFilters(); filterMonth=a.dataset.month; txFilter.type='expense'; view='tx'; render(); }
   else if(act==='toggle-filters'){ showFilters=!showFilters; render(); }
   else if(act==='clear-filters'){ clearFilters(); showFilters=false; render(); }

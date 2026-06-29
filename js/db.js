@@ -15,12 +15,24 @@ let db = null;      // current Database
 let cryptoKey = null;
 
 // ---------- tiny IndexedDB key/value ----------
+let _conn = null;
 function idb(){
+  if(_conn) return Promise.resolve(_conn);
   return new Promise((res, rej) => {
     const r = indexedDB.open(IDB_NAME, 1);
     r.onupgradeneeded = () => r.result.createObjectStore(STORE);
-    r.onsuccess = () => res(r.result);
+    r.onsuccess = () => { _conn = r.result; res(_conn); };
     r.onerror = () => rej(r.error);
+  });
+}
+
+// Permanently delete the whole vault (all data) from this device.
+export async function wipeVault(){
+  db = null; cryptoKey = null;
+  if(_conn){ try { _conn.close(); } catch {} _conn = null; }
+  await new Promise((res) => {
+    const r = indexedDB.deleteDatabase(IDB_NAME);
+    r.onsuccess = () => res(); r.onerror = () => res(); r.onblocked = () => res();
   });
 }
 async function idbGet(key){
