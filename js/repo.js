@@ -115,12 +115,16 @@ export function insertTransaction(tx, rules){
 
 // Import a parsed Banca Intesa statement. `batch` tags every inserted row so a
 // whole import can later be deleted as a unit.
-export function importStatement(parsed, fileName, batch){
+export function importStatement(parsed, fileName, batch, bankLabel){
   const rules = getRules();
   const importBatch = `${batch||new Date().toISOString()}|${fileName||''}`;
+  const bank = (bankLabel||'Banca Intesa').replace(/\s*\(.*\)\s*/,'').trim() || 'Banka';  // strip "(izvod)" etc.
+  const last4 = (parsed.account||'').slice(-4);
   const acct = findOrCreateAccountByNumber(parsed.account, {
-    bank: 'Banca Intesa', currency: parsed.currency || 'RSD',
-    name: `Banca Intesa ${parsed.currency==='EUR'?'devizni':'tekući'} ···${(parsed.account||'').slice(-4)}`,
+    bank, currency: parsed.currency || 'RSD',
+    name: bank==='Banca Intesa'
+      ? `Banca Intesa ${parsed.currency==='EUR'?'devizni':'tekući'} ···${last4}`
+      : `${bank} ···${last4}`,
   });
   let inserted=0, skipped=0;
   const dates = parsed.transactions.map(t=>t.bookingDate).sort();

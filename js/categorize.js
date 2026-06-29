@@ -186,6 +186,15 @@ export const SEED_RULES = [
   ['PAYSPOT','Šoping',3],
   ['ALPROS','Šoping',3],
   ['STRADA','Šoping',3],
+  // UniCredit "LISTA TRANSAKCIJA" wording (no diacritics)
+  ['ODRZAVANJE RACUNA','Bankarske naknade',1],
+  ['MOBILNO BANKARSTVO','Bankarske naknade',1],
+  ['INFOSTAN','Računi i režije',2],
+  ['EPS AD','Računi i režije',2],
+  ['ALIEXPRESS','Šoping',2],
+  ['TEMU','Šoping',2],
+  ['UNICEF','Pokloni i donacije',2],
+  ['PL:ACC','Interni prenos',2],
   // transfers (the specific transfer descriptions are defined at priority 1 above)
   ['PRENOS','Transfer drugima',4],
   ['UPLATA','Ostali prilivi',5],

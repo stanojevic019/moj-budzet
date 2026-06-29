@@ -1,6 +1,6 @@
 // Browser PDF text extraction via pdf.js, feeding the validated column-aware parser.
 import * as pdfjs from '../vendor/pdf.min.mjs';
-import { parseIntesaPages, parseIntesaActivity } from './parse-intesa.js';
+import { parseIntesaPages, parseIntesaActivity, parseUniCredit } from './parse-intesa.js';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).toString();
 
@@ -39,6 +39,13 @@ export async function parseFile(file){
   // Decide format by text signature FIRST — the column (izvod) parser would
   // otherwise misread the activity export into a few garbage rows.
   const flat = pages.flatMap(p=>p.items.map(i=>i.str)).join(' ');
+
+  // UniCredit "LISTA TRANSAKCIJA" (has running balance + unique transaction id).
+  if(/LISTA TRANSAKCIJA/i.test(flat)){
+    const uc = parseUniCredit(pages);
+    if(uc.transactions.length) return { ok:true, bank:'UniCredit', parsed: uc, recon: reconcile(uc) };
+    return { ok:false, error:'Prepoznat UniCredit izvod, ali nije pročitana nijedna stavka.' };
+  }
 
   // Format 2: "RAČUN TRANSAKCIJE" (Mobi export, explicit +/− signs, no balance).
   if(/TIP TRANSAKCIJE|RA.?UN TRANSAKCIJE/i.test(flat)){
