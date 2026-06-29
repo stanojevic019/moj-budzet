@@ -531,7 +531,8 @@ function renderAccounts(s){
       <b class="${a.balance<0?'neg':''} big-num">${fmt(a.balance,a.currency)}</b></div>
       <div class="form-row" style="margin-top:10px">
         <button class="ghost" data-action="acct" data-acct="${a.id}">Transakcije</button>
-        <button class="primary" data-action="add-to-acct" data-acct="${a.id}">＋ Dodaj unos</button>
+        <button class="ghost" data-action="edit-account" data-id="${a.id}">✎ Izmeni</button>
+        <button class="primary" data-action="add-to-acct" data-acct="${a.id}">＋ Dodaj</button>
       </div>
     </section>`).join('')}
     <section class="card">
@@ -673,8 +674,8 @@ function addManualModal(opts={}){
   function syncCur(){
     const a = accounts.find(x=>x.id===+accSel.value);
     const cash = a && a.type==='cash';
-    if(!cash){ curSel.value = a?a.currency:'RSD'; }
-    curSel.disabled = !cash;
+    curSel.value = a ? a.currency : 'RSD';   // default to the account's own currency
+    curSel.disabled = !cash;                 // cash: free to change; bank: fixed
     onCur();
   }
   function onCur(){
@@ -757,6 +758,27 @@ function categoryAddModal(){
     await persist(); m.remove(); toast('Kategorija dodata.'); render(); };
 }
 
+function accountEditModal(id){
+  const a = db.get(`SELECT * FROM accounts WHERE id=?`,[id]); if(!a) return;
+  const n = repo.accountTxCount(id);
+  const m = modal(`<h3>Izmena računa</h3>
+    <input id="aeName" value="${esc(a.name)}" placeholder="Naziv" />
+    <div class="form-row">
+      <label class="fld">Tip<select id="aeType"><option value="bank" ${a.type==='bank'?'selected':''}>Banka</option><option value="cash" ${a.type==='cash'?'selected':''}>Keš</option></select></label>
+      <label class="fld">Valuta<select id="aeCur" ${n>0?'disabled':''}>${CURRENCIES.map(c=>`<option ${a.currency===c?'selected':''}>${c}</option>`).join('')}</select></label>
+    </div>
+    ${n>0?`<div class="muted small">Valuta se ne može menjati jer račun ima ${n} transakcija.</div>`:''}
+    <div class="form-row" style="margin-top:10px"><button class="ghost" data-close>Otkaži</button><button class="primary" id="aeSave">Sačuvaj</button></div>
+    <button class="del-tx" id="aeDel" style="width:100%;margin-top:8px">🗑 Obriši račun${n>0?` (+ ${n} transakcija)`:''}</button>`);
+  m.querySelector('[data-close]').onclick=()=>m.remove();
+  m.querySelector('#aeSave').onclick=async()=>{ const name=m.querySelector('#aeName').value.trim(); if(!name) return;
+    const fields={ name, type:m.querySelector('#aeType').value };
+    if(n===0) fields.currency=m.querySelector('#aeCur').value;
+    repo.updateAccount(id, fields); await persist(); m.remove(); toast('Račun sačuvan.'); render(); };
+  m.querySelector('#aeDel').onclick=async()=>{ if(confirm(`Obrisati račun „${a.name}"${n>0?` i njegovih ${n} transakcija`:''}? Ovo se ne može poništiti.`)){
+    repo.deleteAccount(id); await persist(); m.remove(); toast('Račun obrisan.'); render(); } };
+}
+
 // ---------- auto-lock ----------
 function resetAutoLock(){
   if(lockTimer){ clearTimeout(lockTimer); lockTimer=null; }
@@ -807,6 +829,7 @@ async function onClick(e){
   else if(act==='acct'){ clearFilters(); txFilter.account=+a.dataset.acct; view='tx'; render(); }
   else if(act==='merch'){ clearFilters(); txFilter.q=a.dataset.merch; view='tx'; render(); }
   else if(act==='add-to-acct'){ addManualModal({ accountId:+a.dataset.acct }); }
+  else if(act==='edit-account'){ accountEditModal(+a.dataset.id); }
   else if(act==='spend-month'){ clearFilters(); filterMonth=a.dataset.month; txFilter.type='expense'; view='tx'; render(); }
   else if(act==='toggle-filters'){ showFilters=!showFilters; render(); }
   else if(act==='clear-filters'){ clearFilters(); showFilters=false; render(); }

@@ -1,6 +1,6 @@
 // Browser PDF text extraction via pdf.js, feeding the validated column-aware parser.
 import * as pdfjs from '../vendor/pdf.min.mjs';
-import { parseIntesaPages } from './parse-intesa.js';
+import { parseIntesaPages, parseIntesaActivity } from './parse-intesa.js';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).toString();
 
@@ -36,12 +36,22 @@ export async function parseFile(file){
   } catch(e){
     return { ok:false, error:'Fajl nije čitljiv PDF (možda je šifrovan ili oštećen).', fatal:true };
   }
-  // The parser is specific (date columns + RSD amounts + "Početno stanje"); decide by its result.
+  // Decide format by text signature FIRST — the column (izvod) parser would
+  // otherwise misread the activity export into a few garbage rows.
+  const flat = pages.flatMap(p=>p.items.map(i=>i.str)).join(' ');
+
+  // Format 2: "RAČUN TRANSAKCIJE" (Mobi export, explicit +/− signs, no balance).
+  if(/TIP TRANSAKCIJE|RA.?UN TRANSAKCIJE/i.test(flat)){
+    const act = parseIntesaActivity(pages);
+    if(act.transactions.length) return { ok:true, bank:'Banca Intesa (transakcije)', parsed: act, recon:{ ok:null } };
+    return { ok:false, error:'Prepoznat „Račun transakcije", ali nije pročitana nijedna stavka.' };
+  }
+
+  // Format 1: formal "IZVOD PLATNOG RAČUNA" (column-based, has running balance).
   const parsed = parseIntesaPages(pages);
   if(parsed.transactions.length){
-    return { ok:true, bank:'Banca Intesa', parsed, recon: reconcile(parsed) };
+    return { ok:true, bank:'Banca Intesa (izvod)', parsed, recon: reconcile(parsed) };
   }
-  const flat = pages.flatMap(p=>p.items.map(i=>i.str)).join(' ');
   if(/IZVOD PLATNOG/i.test(flat) || /bancaintesa/i.test(flat))
     return { ok:false, error:'Prepoznat Intesa izvod, ali nije pronađena nijedna transakcija.' };
   return { ok:false, error:'Format izvoda nije prepoznat (za sada je podržana Banca Intesa).' };

@@ -164,8 +164,16 @@ export function addAccount({name,type,bank,currency,opening_balance,color}){
   return db.lastId();
 }
 export function updateAccount(id, fields){
-  const keys = Object.keys(fields);
+  const allowed = ['name','type','currency','color'];
+  const keys = Object.keys(fields).filter(k=>allowed.includes(k));
+  if(!keys.length) return;
   db.run(`UPDATE accounts SET ${keys.map(k=>k+'=?').join(',')} WHERE id=?`, [...keys.map(k=>fields[k]), id]);
+}
+export const accountTxCount = (id) => db.get(`SELECT COUNT(*) AS c FROM transactions WHERE account_id=?`, [id]).c;
+// Delete an account and all of its transactions.
+export function deleteAccount(id){
+  db.run(`DELETE FROM transactions WHERE account_id=?`, [id]);
+  db.run(`DELETE FROM accounts WHERE id=?`, [id]);
 }
 
 export function addRule(match, category_id, priority=3){
