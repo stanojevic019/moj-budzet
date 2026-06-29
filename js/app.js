@@ -653,6 +653,18 @@ function modal(html){
   m.addEventListener('click', e=>{ if(e.target===m) m.remove(); });
   document.body.appendChild(m); return m;
 }
+// In-app confirm (native confirm() is unreliable in installed/standalone PWAs).
+function confirmModal(message, okLabel='Obriši'){
+  return new Promise(res=>{
+    const m = modal(`<h3>Potvrda</h3><div class="muted small">${esc(message)}</div>
+      <div class="form-row" style="margin-top:14px"><button class="ghost" data-no>Otkaži</button>
+      <button class="del-tx" data-yes style="flex:1">${esc(okLabel)}</button></div>`);
+    let done=false; const fin=(v)=>{ if(done)return; done=true; m.remove(); res(v); };
+    m.querySelector('[data-no]').onclick=()=>fin(false);
+    m.querySelector('[data-yes]').onclick=()=>fin(true);
+    m.addEventListener('click', e=>{ if(e.target===m) fin(false); });
+  });
+}
 function addManualModal(opts={}){
   const accounts = repo.getAccounts();
   const cats = repo.getCategories();
@@ -712,7 +724,7 @@ function editCatModal(txId){
     <button class="del-tx" data-action="del-tx" data-id="${txId}">🗑 Obriši transakciju</button></div>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
   m.querySelectorAll('.catp').forEach(b=> b.onclick = async ()=>{ repo.setCategory(txId, +b.dataset.cat); await persist(); m.remove(); toast('Kategorija promenjena.'); render(); });
-  m.querySelector('.del-tx').onclick = async ()=>{ if(confirm('Obrisati transakciju?')){ repo.deleteTransaction(txId); await persist(); m.remove(); render(); } };
+  m.querySelector('.del-tx').onclick = async ()=>{ if(await confirmModal('Obrisati transakciju?')){ repo.deleteTransaction(txId); await persist(); m.remove(); toast('Transakcija obrisana.'); render(); } };
 }
 
 // FAB quick-action sheet
@@ -748,7 +760,7 @@ function categoryEditModal(id){
     catch(e){ toast(e.message==='exists'?'Kategorija sa tim imenom već postoji.':'Greška.', false); return; }
     await persist(); m.remove(); toast('Kategorija sačuvana.'); render(); };
   const del=m.querySelector('#ceDel');
-  if(del) del.onclick=async()=>{ if(confirm('Obrisati kategoriju? Njene transakcije se premeštaju u „Ostalo / Nekategorisano".')){
+  if(del) del.onclick=async()=>{ if(await confirmModal('Obrisati kategoriju? Njene transakcije se premeštaju u „Ostalo / Nekategorisano".')){
     if(repo.deleteCategory(id)){ await persist(); m.remove(); toast('Kategorija obrisana.'); render(); } else toast('Ova kategorija se ne može obrisati.',false); } };
 }
 function categoryAddModal(){
@@ -781,7 +793,7 @@ function accountEditModal(id){
     const fields={ name, type:m.querySelector('#aeType').value };
     if(n===0) fields.currency=m.querySelector('#aeCur').value;
     repo.updateAccount(id, fields); await persist(); m.remove(); toast('Račun sačuvan.'); render(); };
-  m.querySelector('#aeDel').onclick=async()=>{ if(confirm(`Obrisati račun „${a.name}"${n>0?` i njegovih ${n} transakcija`:''}? Ovo se ne može poništiti.`)){
+  m.querySelector('#aeDel').onclick=async()=>{ if(await confirmModal(`Obrisati račun „${a.name}"${n>0?` i njegovih ${n} transakcija`:''}? Ovo se ne može poništiti.`)){
     repo.deleteAccount(id); await persist(); m.remove(); toast('Račun obrisan.'); render(); } };
 }
 
@@ -793,7 +805,9 @@ function wipeAllModal(){
     <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="del-tx" id="wipeGo" style="flex:1">Obriši sve</button></div>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
   m.querySelector('#wipeGo').onclick=async()=>{
-    if(m.querySelector('#wipeC').value.trim().toUpperCase()!=='OBRIŠI'){ toast('Upiši OBRIŠI za potvrdu.',false); return; }
+    // accept OBRIŠI / OBRISI / DELETE (tolerate missing diacritic on phone keyboards)
+    const v = m.querySelector('#wipeC').value.trim().toUpperCase().replace(/Š/g,'S');
+    if(v!=='OBRISI' && v!=='DELETE'){ toast('Upiši OBRIŠI (ili OBRISI) za potvrdu.',false); return; }
     await db.wipeVault(); location.reload();
   };
   m.querySelector('#wipeC').focus();
