@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -142,7 +142,7 @@ function createSchema(){
       archived INTEGER DEFAULT 0);
     CREATE TABLE categories(
       id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
-      kind TEXT NOT NULL, color TEXT, icon TEXT, grp TEXT, archived INTEGER DEFAULT 0);
+      kind TEXT NOT NULL, color TEXT, icon TEXT, grp TEXT, parent_id INTEGER, archived INTEGER DEFAULT 0);
     CREATE TABLE budgets(
       id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER UNIQUE,
       amount REAL NOT NULL, period TEXT DEFAULT 'monthly');
@@ -165,8 +165,16 @@ function createSchema(){
 
 function seed(){
   const catId = {};
-  for(const [name, kind, color, icon, grp] of SEED_CATEGORIES){
-    db.run(`INSERT INTO categories(name,kind,color,icon,grp) VALUES(?,?,?,?,?)`, [name,kind,color,icon,grp||null]);
+  // pass 1: top-level groups (no parent) so their ids exist for subcategories
+  for(const [name, kind, color, icon, grp, parent] of SEED_CATEGORIES){
+    if(parent) continue;
+    db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES(?,?,?,?,?,NULL)`, [name,kind,color,icon,grp||null]);
+    catId[name] = lastId();
+  }
+  // pass 2: subcategories
+  for(const [name, kind, color, icon, grp, parent] of SEED_CATEGORIES){
+    if(!parent) continue;
+    db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES(?,?,?,?,?,?)`, [name,kind,color,icon,grp||null, catId[parent]||null]);
     catId[name] = lastId();
   }
   for(const [match, catName, priority] of SEED_RULES){
@@ -265,6 +273,48 @@ function migrate(){
     }
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','7') ON CONFLICT(key) DO UPDATE SET value='7'`);
     v = 7;
+  }
+  if(v < 8){
+    // introduce two-level categories: create groups, nest existing categories under
+    // them (parent_id), add a few new subcategories. Data-safe (no tx touched).
+    try { db.run(`ALTER TABLE categories ADD COLUMN parent_id INTEGER`); } catch {}
+    const idOf = (name) => { const r = get(`SELECT id FROM categories WHERE name=?`, [name]); return r ? r.id : null; };
+    const ensureCat = (name, kind, color, icon, grp, parentId) => {
+      let id = idOf(name);
+      if(id == null){ db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES(?,?,?,?,?,?)`, [name,kind,color,icon,grp||null,parentId||null]); id = lastId(); }
+      return id;
+    };
+    const groups = {};
+    for(const [n,k,c,i] of [['Hrana','expense','#22c55e','🍽️'],['Vozilo i prevoz','expense','#eab308','🚗'],
+      ['Stanovanje','expense','#14b8a6','🏠'],['Zdravlje i nega','expense','#ef4444','💊'],['Kupovina','expense','#f43f5e','🛍️'],
+      ['Slobodno vreme','expense','#a21caf','🎬'],['Porodica','expense','#fb7185','👨‍👩‍👧'],['Obaveze i finansije','expense','#94a3b8','🏦'],
+      ['Gotovina i transferi','transfer','#64748b','🔁'],['Prihodi','income','#16a34a','💼'],['Ostalo','expense','#6b7280','❓']])
+      groups[n] = ensureCat(n,k,c,i,null,null);
+    const map = {
+      'Namirnice':'Hrana','Restorani i kafići':'Hrana','Automobil i prevoz':'Vozilo i prevoz',
+      'Računi i režije':'Stanovanje','Telefon i internet':'Stanovanje','Dom i domaćinstvo':'Stanovanje',
+      'Zdravlje i apoteka':'Zdravlje i nega','Lična nega':'Zdravlje i nega','Sport i rekreacija':'Zdravlje i nega',
+      'Šoping':'Kupovina','Odeća i obuća':'Kupovina','Pretplate i digitalne usluge':'Slobodno vreme',
+      'Zabava':'Slobodno vreme','Putovanja':'Slobodno vreme','Deca':'Porodica','Obrazovanje':'Porodica',
+      'Pokloni i donacije':'Porodica','Obaveze (porezi/osiguranje)':'Obaveze i finansije','Bankarske naknade':'Obaveze i finansije',
+      'Kredit – kamata':'Obaveze i finansije','Kredit – glavnica':'Obaveze i finansije','Podizanje keša':'Gotovina i transferi',
+      'Transfer drugima':'Gotovina i transferi','Interni prenos':'Gotovina i transferi','Menjačnica (devize)':'Gotovina i transferi',
+      'Štednja i ulaganja':'Gotovina i transferi','Ostalo / Nekategorisano':'Ostalo','Zarada':'Prihodi','Ostali prilivi':'Prihodi',
+    };
+    for(const [cat, grp] of Object.entries(map)){
+      const cid = idOf(cat), gid = groups[grp];
+      if(cid!=null && gid!=null && cid!==gid) db.run(`UPDATE categories SET parent_id=? WHERE id=?`, [gid, cid]);
+    }
+    ensureCat('Dostava hrane','expense','#fb923c','🛵','wants',groups['Hrana']);
+    ensureCat('Gorivo','expense','#eab308','⛽','needs',groups['Vozilo i prevoz']);
+    ensureCat('Servis i delovi','expense','#ca8a04','🔧','needs',groups['Vozilo i prevoz']);
+    ensureCat('Registracija','expense','#a16207','📋','needs',groups['Vozilo i prevoz']);
+    ensureCat('Putarina i parking','expense','#a3a3a3','🅿️','needs',groups['Vozilo i prevoz']);
+    ensureCat('Taksi i gradski prevoz','expense','#0ea5e9','🚕','needs',groups['Vozilo i prevoz']);
+    ensureCat('Kirija','expense','#0e7490','🔑','needs',groups['Stanovanje']);
+    ensureCat('Tehnika','expense','#7c3aed','💻','wants',groups['Kupovina']);
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','8') ON CONFLICT(key) DO UPDATE SET value='8'`);
+    v = 8;
   }
 }
 

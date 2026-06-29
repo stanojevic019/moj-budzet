@@ -166,6 +166,14 @@ code{background:var(--bg2); padding:2px 7px; border-radius:6px; font-size:.85em}
 .accent-dot{width:30px; height:30px; border-radius:50%; padding:0; border:2px solid transparent}
 .accent-dot.sel{border-color:var(--txt); transform:scale(1.12)}
 
+/* category groups / subcategory tree */
+.catgrp{margin:6px 0 10px}
+.catgrp-h{display:flex; align-items:center; gap:8px; font-size:12px; font-weight:700; color:var(--muted); margin:8px 0 5px}
+.catchip.grp{font-weight:700}
+.addsub{background:transparent; border:1px solid var(--line); color:var(--accent); font-size:11px; padding:4px 9px; border-radius:8px}
+.cat-tree{max-height:52vh; overflow:auto; margin:8px 0}
+.ctg-h{font-size:11px; color:var(--muted); font-weight:700; margin:9px 0 4px; text-transform:uppercase; letter-spacing:.3px}
+
 /* clickable deep-dive affordance */
 .kpi[data-action],.acct-row[data-action],.rec-row[data-action],.cl[data-action],.tx[data-action]{cursor:pointer}
 .kpi[data-action]:active,.acct-row[data-action]:active,.rec-row[data-action]:active,.cl[data-action]:active{opacity:.55}

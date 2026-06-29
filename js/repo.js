@@ -42,16 +42,16 @@ const nameExists = (name, exceptId=null) =>
   !!db.get(`SELECT id FROM categories WHERE name=? ${exceptId?'AND id<>?':''}`, exceptId?[name,exceptId]:[name]);
 
 // throws Error('exists') on duplicate name
-export function addCategory({name, kind, color, icon, grp}){
+export function addCategory({name, kind, color, icon, grp, parent_id}){
   if(nameExists(name)) throw new Error('exists');
-  db.run(`INSERT INTO categories(name,kind,color,icon,grp) VALUES(?,?,?,?,?)`,
-    [name, kind||'expense', color||'#6b7280', sanitizeIcon(icon), grp||null]);
+  db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES(?,?,?,?,?,?)`,
+    [name, kind||'expense', color||'#6b7280', sanitizeIcon(icon), grp||null, parent_id||null]);
   return db.lastId();
 }
 // Protected (system) categories: only color/icon/grp editable, never name. throws Error('exists') on dup name.
 export function updateCategory(id, fields){
   const protectedCat = isProtectedCategory(id);
-  const allowed = protectedCat ? ['color','icon','grp'] : ['name','color','icon','grp'];
+  const allowed = protectedCat ? ['color','icon','grp','parent_id'] : ['name','color','icon','grp','parent_id'];
   const out = {};
   for(const k of allowed) if(k in fields) out[k] = k==='icon' ? sanitizeIcon(fields[k]) : fields[k];
   if(out.name!=null && nameExists(out.name, id)) throw new Error('exists');
@@ -65,11 +65,18 @@ export function deleteCategory(id){
   if(isProtectedCategory(id)) return false;
   const fallback = catMap()['Ostalo / Nekategorisano'];
   if(id === fallback || fallback == null) return false;
+  db.run(`UPDATE categories SET parent_id=NULL WHERE parent_id=?`, [id]);   // children become top-level groups
   db.run(`UPDATE transactions SET category_id=? WHERE category_id=?`, [fallback, id]);
   db.run(`DELETE FROM budgets WHERE category_id=?`, [id]);
   db.run(`DELETE FROM rules WHERE category_id=?`, [id]);
   db.run(`DELETE FROM categories WHERE id=?`, [id]);
   return true;
+}
+// Categories grouped as [{group, subs:[...]}] for pickers / management.
+export function getCatTree(){
+  const cats = getCategories();
+  const groups = cats.filter(c=>c.parent_id==null);
+  return groups.map(g => ({ ...g, subs: cats.filter(c=>c.parent_id===g.id) }));
 }
 export const catMap = () => { const m={}; for(const c of getCategories()) m[c.name]=c.id; return m; };
 
