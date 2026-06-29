@@ -127,6 +127,7 @@ function enterApp(){
       ${tab('accounts','🏦','Računi')}
       ${tab('settings','⚙️','Više')}
     </nav>`;
+  if(updateReady){ const b=$('#updateBanner'); if(b) b.classList.remove('hidden'); }
   resetAutoLock();
   render();
 }
@@ -809,16 +810,19 @@ function resetAutoLock(){
 }
 
 // ---------- service-worker auto-update ----------
-let hadController = false, userTriggeredUpdate = false;
+let hadController = false, userTriggeredUpdate = false, updateReady = false;
+function showUpdateBanner(){ updateReady = true; const b = $('#updateBanner'); if(b) b.classList.remove('hidden'); }
 async function registerSW(){
   if(!('serviceWorker' in navigator)) return;
   hadController = !!navigator.serviceWorker.controller; // false on first-ever install
   try {
     swReg = await navigator.serviceWorker.register('sw.js');
+    // a new version may already be downloaded and waiting at load time
+    if(swReg.waiting && navigator.serviceWorker.controller) showUpdateBanner();
     swReg.addEventListener('updatefound', ()=>{
       const nw = swReg.installing;
       if(nw) nw.addEventListener('statechange', ()=>{
-        if(nw.state==='installed' && navigator.serviceWorker.controller) { const b=$('#updateBanner'); if(b) b.classList.remove('hidden'); }
+        if(nw.state==='installed' && navigator.serviceWorker.controller) showUpdateBanner();
       });
     });
     let reloaded=false;
@@ -827,6 +831,7 @@ async function registerSW(){
       if(!hadController && !userTriggeredUpdate) return; // don't reload on first install
       reloaded=true; location.reload();
     });
+    swReg.update().catch(()=>{});                          // check immediately
     setInterval(()=>swReg && swReg.update().catch(()=>{}), 60000);
   } catch {}
 }
