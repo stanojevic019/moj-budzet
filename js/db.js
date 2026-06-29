@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -146,6 +146,7 @@ function createSchema(){
     CREATE TABLE budgets(
       id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER UNIQUE,
       amount REAL NOT NULL, period TEXT DEFAULT 'monthly');
+    CREATE TABLE learned(key TEXT PRIMARY KEY, category_id INTEGER, n INTEGER DEFAULT 1);
     CREATE TABLE rules(
       id INTEGER PRIMARY KEY AUTOINCREMENT, match TEXT NOT NULL,
       category_id INTEGER NOT NULL, priority INTEGER DEFAULT 5);
@@ -219,6 +220,11 @@ function migrate(){
     }
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','5') ON CONFLICT(key) DO UPDATE SET value='5'`);
     v = 5;
+  }
+  if(v < 6){
+    db.run(`CREATE TABLE IF NOT EXISTS learned(key TEXT PRIMARY KEY, category_id INTEGER, n INTEGER DEFAULT 1)`);
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','6') ON CONFLICT(key) DO UPDATE SET value='6'`);
+    v = 6;
   }
 }
 

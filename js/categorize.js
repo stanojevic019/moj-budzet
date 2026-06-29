@@ -200,13 +200,64 @@ export const SEED_RULES = [
   ['UPLATA','Ostali prilivi',5],
 ];
 
-// Apply rules to one transaction-like object. Returns categoryId or null.
+// ---------- on-device learning (merchant memory + Naive Bayes) ----------
+const STOP = new Set(['KUPOVINA','CARD','REF','BOOKING','DATE','RSD','EUR','USD','NA','AD','DOO','BEOGRAD','PLAĆANJE','KARTICOM','BANKOMAT','TRANSACTIONCARD','TRANSACTION','INTERNET','SIF','PBO','PBZ','IZ','UPLATA','ISPLATA']);
+export function tokenize(text){
+  return [...new Set((text||'').toUpperCase().replace(/[^A-ZČĆŽŠĐ0-9 ]/g,' ').split(/\s+/)
+    .filter(t => t.length>=3 && !/^\d+$/.test(t) && !STOP.has(t)))].slice(0,40);
+}
+// stable key for "this exact merchant" memory
+export function merchantKey(merchant, description){
+  const toks = tokenize(merchant || description).filter(t=>!/^\d/.test(t)).slice(0,3);
+  return toks.join(' ');
+}
+// Multinomial Naive Bayes trained on the user's already-categorized transactions.
+export function trainModel(samples){
+  const classCount={}, classKind={}, tokAll={}, vocab=new Set(); let total=0;
+  for(const s of samples){
+    const cid=s.category_id;
+    classCount[cid]=(classCount[cid]||0)+1; classKind[cid]=s.kind; total++;
+    const tc = tokAll[cid] || (tokAll[cid]={_n:0});
+    for(const t of tokenize(s.text)){ tc[t]=(tc[t]||0)+1; tc._n++; vocab.add(t); }
+  }
+  return { classCount, classKind, tokAll, V:vocab.size, total };
+}
+export function predict(text, model, isCredit){
+  if(!model || model.total < 25) return null;          // need enough history
+  const toks = tokenize(text); if(!toks.length) return null;
+  const logps = [];
+  for(const cid in model.classCount){
+    const kind = model.classKind[cid];
+    if(kind==='income' && !isCredit) continue;
+    if(kind==='expense' && isCredit) continue;
+    const tc = model.tokAll[cid] || {_n:0};
+    let lp = Math.log(model.classCount[cid]/model.total);
+    for(const t of toks) lp += Math.log(((tc[t]||0)+1)/(tc._n + model.V));
+    logps.push({ cid:+cid, lp });
+  }
+  if(!logps.length) return null;
+  const max = Math.max(...logps.map(x=>x.lp));
+  let denom=0; for(const x of logps) denom += Math.exp(x.lp-max);
+  logps.sort((a,b)=>b.lp-a.lp);
+  const top = logps[0]; const prob = Math.exp(top.lp-max)/denom;
+  return prob >= 0.7 ? { category_id: top.cid, prob } : null;   // only confident guesses
+}
+
+// Apply rules + learning to one transaction-like object. Returns categoryId or null.
+// ctx = { learned: {key->catId}, model } (optional). Priority: learned → rules → ML.
 // `rules` rows carry the category `kind` (from getRules' join). Matching is
 // sign-aware: an income transaction never gets an expense category and vice
 // versa (transfer categories apply to both). Reads either merchant_clean
 // (insert time) or merchant (DB row, on re-categorization).
-export function categorize(tx, rules, isCredit){
-  const hay = `${tx.merchant_clean||tx.merchant||''} ${tx.description||''} ${tx.counterparty||''}`.toUpperCase();
+export function categorize(tx, rules, isCredit, ctx){
+  const merch = tx.merchant_clean || tx.merchant || '';
+  // 1) learned exact merchant (taught by the user) — strongest
+  if(ctx && ctx.learned){
+    const k = merchantKey(merch, tx.description);
+    if(k && ctx.learned[k] != null) return ctx.learned[k];
+  }
+  // 2) explicit keyword rules
+  const hay = `${merch} ${tx.description||''} ${tx.counterparty||''}`.toUpperCase();
   let best = null;
   for(const r of rules){
     if(r.kind === 'income'  && !isCredit) continue;
@@ -215,5 +266,11 @@ export function categorize(tx, rules, isCredit){
       if(best === null || r.priority < best.priority) best = r;
     }
   }
-  return best ? best.category_id : null; // caller assigns default if null
+  if(best) return best.category_id;
+  // 3) on-device ML prediction (only when confident)
+  if(ctx && ctx.model){
+    const p = predict(`${merch} ${tx.description||''}`, ctx.model, isCredit);
+    if(p) return p.category_id;
+  }
+  return null; // caller assigns default if null
 }

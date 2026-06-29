@@ -2,7 +2,22 @@
 // (with auto-categorization + dedupe), statement import, and manual entry.
 
 import * as db from './db.js';
-import { cleanMerchant, categorize, sanitizeIcon, PROTECTED_CATEGORY_NAMES } from './categorize.js';
+import { cleanMerchant, categorize, sanitizeIcon, PROTECTED_CATEGORY_NAMES, merchantKey, trainModel } from './categorize.js';
+
+// Build the learning context: merchant memory + a Naive Bayes model trained on the
+// user's already-categorized transactions. Cheap enough to build per import/recat.
+export function buildCtx(){
+  const learned = {};
+  for(const r of db.all(`SELECT key, category_id FROM learned`)) learned[r.key] = r.category_id;
+  const m = catMap();
+  const defE = m['Ostalo / Nekategorisano'], defI = m['Ostali prilivi'];
+  const kind = {}; for(const c of getCategories(true)) kind[c.id] = c.kind;
+  const samples = db.all(
+    `SELECT merchant, description, category_id FROM transactions
+     WHERE category_id IS NOT NULL AND category_id NOT IN (?,?)`, [defE, defI])
+    .map(r => ({ text: `${r.merchant||''} ${r.description||''}`, category_id: r.category_id, kind: kind[r.category_id] }));
+  return { learned, model: trainModel(samples) };
+}
 
 export const isProtectedCategory = (id) => {
   const c = db.get(`SELECT name FROM categories WHERE id=?`, [id]);
@@ -92,7 +107,7 @@ function defaultCategoryId(isCredit){
 // Insert one transaction. tx: {account_id,date,amount(signed),currency,description,
 //   counterparty,merchant,ref,fee,fx,balance,source,note,dedupe_key,category_id?}
 // Returns 'inserted' | 'skipped'(duplicate).
-export function insertTransaction(tx, rules){
+export function insertTransaction(tx, rules, ctx){
   if(tx.dedupe_key){
     const dup = db.get(`SELECT id FROM transactions WHERE dedupe_key=?`, [tx.dedupe_key]);
     if(dup) return 'skipped';
@@ -101,7 +116,7 @@ export function insertTransaction(tx, rules){
   let catId = tx.category_id;
   if(catId == null){
     catId = categorize({ merchant_clean: tx.merchant, description: tx.description, counterparty: tx.counterparty },
-                       rules || getRules(), isCredit);
+                       rules || getRules(), isCredit, ctx);
     if(catId == null) catId = defaultCategoryId(isCredit);
   }
   db.run(`INSERT INTO transactions
@@ -117,6 +132,7 @@ export function insertTransaction(tx, rules){
 // whole import can later be deleted as a unit.
 export function importStatement(parsed, fileName, batch, bankLabel){
   const rules = getRules();
+  const ctx = buildCtx();
   const importBatch = `${batch||new Date().toISOString()}|${fileName||''}`;
   const bank = (bankLabel||'Banca Intesa').replace(/\s*\(.*\)\s*/,'').trim() || 'Banka';  // strip "(izvod)" etc.
   const last4 = (parsed.account||'').slice(-4);
@@ -137,7 +153,7 @@ export function importStatement(parsed, fileName, batch, bankLabel){
       account_id: acct.id, date: t.bookingDate, amount: t.signed, currency: t.currency||acct.currency,
       description: t.description, counterparty: t.counterparty, merchant,
       ref: t.ref, fee: t.fee, fx: t.fx, balance: t.balance, source: 'pdf', dedupe_key: dedupe, import_batch: importBatch,
-    }, rules);
+    }, rules, ctx);
     if(r==='inserted') inserted++; else skipped++;
   }
   // maintain earliest opening balance for correct running totals
@@ -154,13 +170,25 @@ export function importStatement(parsed, fileName, batch, bankLabel){
 export function addManual({account_id, date, amount, kind, category_id, description, note}){
   const signed = kind==='income' ? Math.abs(amount) : -Math.abs(amount);
   const acct = db.get(`SELECT * FROM accounts WHERE id=?`, [account_id]);
-  return insertTransaction({
+  const res = insertTransaction({
     account_id, date, amount: signed, currency: acct?.currency||'RSD',
     description, merchant: description, category_id, source:'manual', note,
   });
+  if(res==='inserted' && category_id) learnFromTx(db.lastId(), category_id);  // teach from manual entries too
+  return res;
 }
 
 export function deleteTransaction(id){ db.run(`DELETE FROM transactions WHERE id=?`, [id]); }
+// teach: remember this merchant→category so future imports recognize it
+export function learnFromTx(txId, catId){
+  const t = db.get(`SELECT merchant, description FROM transactions WHERE id=?`, [txId]);
+  if(!t) return;
+  const k = merchantKey(t.merchant, t.description);
+  if(!k) return;
+  db.run(`INSERT INTO learned(key,category_id,n) VALUES(?,?,1)
+          ON CONFLICT(key) DO UPDATE SET category_id=?, n=n+1`, [k, catId, catId]);
+}
+export const learnedCount = () => db.get(`SELECT COUNT(*) AS c FROM learned`).c;
 // Bulk delete by an arbitrary WHERE (built by the UI from the active filters).
 export function countWhere(whereSql, params){ return db.get(`SELECT COUNT(*) AS c FROM transactions ${whereSql}`, params).c; }
 export function deleteWhere(whereSql, params){ db.run(`DELETE FROM transactions ${whereSql}`, params); }
@@ -169,7 +197,10 @@ export const getImportBatches = () => db.all(`
   SELECT import_batch AS batch, COUNT(*) AS n, MIN(date) AS mn, MAX(date) AS mx
   FROM transactions WHERE import_batch IS NOT NULL GROUP BY import_batch ORDER BY mx DESC, batch DESC`);
 export function deleteByBatch(batch){ db.run(`DELETE FROM transactions WHERE import_batch=?`, [batch]); }
-export function setCategory(txId, catId){ db.run(`UPDATE transactions SET category_id=? WHERE id=?`, [catId, txId]); }
+export function setCategory(txId, catId){
+  db.run(`UPDATE transactions SET category_id=? WHERE id=?`, [catId, txId]);
+  learnFromTx(txId, catId);   // every manual correction teaches the model
+}
 
 export function addAccount({name,type,bank,currency,opening_balance,color}){
   db.run(`INSERT INTO accounts(name,type,bank,currency,opening_balance,opening_date,color) VALUES(?,?,?,?,?,?,?)`,
@@ -198,13 +229,14 @@ export function deleteRule(id){ db.run(`DELETE FROM rules WHERE id=?`, [id]); }
 // Re-run categorization for all uncategorized / or all transactions.
 export function recategorizeAll(onlyDefault=true){
   const rules = getRules();
+  const ctx = buildCtx();   // learned memory + ML model
   const m = catMap();
   const defExp = m['Ostalo / Nekategorisano'], defInc = m['Ostali prilivi'];
   const rows = db.all(`SELECT * FROM transactions`);
   let changed=0;
   for(const t of rows){
     if(onlyDefault && t.category_id !== defExp && t.category_id !== defInc) continue;
-    const cat = categorize(t, rules, t.amount>=0);
+    const cat = categorize(t, rules, t.amount>=0, ctx);
     if(cat && cat !== t.category_id){ db.run(`UPDATE transactions SET category_id=? WHERE id=?`,[cat,t.id]); changed++; }
   }
   return changed;
