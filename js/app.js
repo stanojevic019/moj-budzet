@@ -29,6 +29,17 @@ function fmtN(n){ return nf2.format(Math.round(n||0)); }
 function pct(n){ return (n>=0?'+':'') + (n==null?'–':n.toFixed(0)) + '%'; }
 const esc = (s) => (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const todayLocal = () => { const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); };
+// grouped <select> options (optgroup per category group, subcategories as options)
+function catSelectOptions(selectedId){
+  return repo.getCatTree().map(g => {
+    if(!g.subs.length) return '';
+    return `<optgroup label="${esc(g.icon+' '+g.name)}">`
+      + g.subs.map(c=>`<option value="${c.id}" ${selectedId==c.id?'selected':''}>${esc(c.icon+' '+c.name)}</option>`).join('')
+      + `</optgroup>`;
+  }).join('');
+}
+const groupSelectOptions = (selId) => repo.getCatTree()
+  .map(g=>`<option value="${g.id}" ${selId==g.id?'selected':''}>${esc(g.icon+' '+g.name)}</option>`).join('');
 
 const CURRENCIES = ['RSD','EUR','USD','CHF','GBP'];
 const DEFAULT_RATES = { EUR:117.5, USD:108, CHF:125, GBP:137 };
@@ -176,7 +187,12 @@ function renderDashboard(s){
   const months = m.map(x=>x.label);
   const allOut = an.categoryBreakdown(k.current.month,'expense',rate);
   const exSet = new Set(an.EXCLUDE_SPENDING);
-  const breakdown = allOut.filter(c=>!exSet.has(c.name)).slice(0,8);   // real spending
+  const cidx = {}; repo.getCategories(true).forEach(c=>cidx[c.id]=c);
+  const groupOf = (id)=>{ const c=cidx[id]; return c && c.parent_id!=null ? (cidx[c.parent_id]||c) : c; };
+  const gAgg = {};                                                     // roll real spending up to groups
+  for(const r of allOut){ if(exSet.has(r.name)) continue; const g=groupOf(r.id); if(!g) continue;
+    const e = gAgg[g.id] || (gAgg[g.id]={ id:g.id, name:g.name, icon:g.icon, color:g.color, total:0 }); e.total += r.total; }
+  const breakdown = Object.values(gAgg).sort((a,b)=>b.total-a.total).slice(0,8);
   const flows = allOut.filter(c=>exSet.has(c.name));                   // transfers, cash, FX, loan principal
   const rec = an.recurring(rate);
   const recMonthly = rec.reduce((s,r)=>s+r.median,0);
@@ -230,12 +246,12 @@ function renderDashboard(s){
     </section>
 
     <section class="card">
-      <div class="row-between"><h3>Rashodi po kategorijama · ${k.current.label}</h3></div>
+      <div class="row-between"><h3>Rashodi po grupama · ${k.current.label}</h3></div>
       <div class="chart-wrap small"><canvas id="cCat"></canvas></div>
       <div class="cat-legend">
-        ${breakdown.map(c=>`<div class="cl" data-action="drill" data-cat="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.icon)} ${esc(c.name)}<b>${fmt(c.total)}</b></div>`).join('')}
+        ${breakdown.map(c=>`<div class="cl" data-action="drill-group" data-group="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.icon)} ${esc(c.name)}<b>${fmt(c.total)}</b></div>`).join('')}
       </div>
-      <div class="muted small">Dodirni kategoriju za detalje →</div>
+      <div class="muted small">Dodirni grupu za potkategorije/transakcije →</div>
     </section>
 
     ${flows.length ? `<section class="card">
@@ -329,9 +345,9 @@ function barOpts(){ return { responsive:true, maintainAspectRatio:false,
   scales:{ y:{ ticks:{ callback:v=>fmtN(v) } }, x:{ ticks:{ font:{size:10} } } } }; }
 
 // =================================================================== TRANSACTIONS
-const txFilter = { account:null, category:null, q:null, from:null, to:null, min:null, max:null, type:null };
+const txFilter = { account:null, category:null, group:null, q:null, from:null, to:null, min:null, max:null, type:null };
 function activeFilterCount(){ let n = filterMonth?1:0;
-  for(const k of ['account','category','q','from','to','type']) if(txFilter[k]) n++;
+  for(const k of ['account','category','group','q','from','to','type']) if(txFilter[k]) n++;
   if(+txFilter.min>0) n++; if(+txFilter.max>0) n++; return n; }
 function clearFilters(){ Object.keys(txFilter).forEach(k=>txFilter[k]=null); filterMonth=null; drillCat=null; }
 
@@ -340,6 +356,7 @@ function buildTxWhere(){
   if(filterMonth){ where.push(`substr(date,1,7)=?`); params.push(filterMonth); }
   if(txFilter.account){ where.push(`account_id=?`); params.push(txFilter.account); }
   if(txFilter.category){ where.push(`category_id=?`); params.push(txFilter.category); }
+  if(txFilter.group){ where.push(`category_id IN (SELECT id FROM categories WHERE id=? OR parent_id=?)`); params.push(txFilter.group, txFilter.group); }
   if(txFilter.from){ where.push(`date>=?`); params.push(txFilter.from); }
   if(txFilter.to){ where.push(`date<=?`); params.push(txFilter.to); }
   if(txFilter.type==='income') where.push(`amount>0`);
@@ -366,7 +383,7 @@ function renderTx(s){
      COALESCE(SUM(CASE WHEN amount<0 THEN -amount*${conv} ELSE 0 END),0) AS out
      FROM transactions ${whereSql}`, params);
   const sumIn = agg.inc, sumOut = agg.out, totalN = agg.n;
-  const drill = txFilter.category ? catMapById[txFilter.category] : null;
+  const drill = (txFilter.group ? catMapById[txFilter.group] : null) || (txFilter.category ? catMapById[txFilter.category] : null);
 
   s.innerHTML = `
     ${rows.length ? `<section class="card">
@@ -376,7 +393,7 @@ function renderTx(s){
     <div class="toolbar">
       <select data-filter="month"><option value="">Svi meseci</option>${months.map(mm=>`<option value="${mm}" ${filterMonth===mm?'selected':''}>${an.fmtMonth(mm)}</option>`).join('')}</select>
       <select data-filter="account"><option value="">Svi računi</option>${accounts.map(a=>`<option value="${a.id}" ${txFilter.account==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select>
-      <select data-filter="category"><option value="">Sve kategorije</option>${cats.map(c=>`<option value="${c.id}" ${txFilter.category==c.id?'selected':''}>${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
+      <select data-filter="category"><option value="">Sve kategorije</option>${catSelectOptions(txFilter.category)}</select>
       <input data-filter="q" placeholder="🔎 Traži…" value="${esc(txFilter.q||'')}" />
       <button class="ghost filt-toggle" data-action="toggle-filters">⚙︎ Filteri${activeFilterCount()?` (${activeFilterCount()})`:''}</button>
     </div>
@@ -436,7 +453,7 @@ function renderBudgets(s){
   const monthsList = m.map(x=>x.month).reverse();
   const month = (budgetMonth && monthsList.includes(budgetMonth)) ? budgetMonth : monthsList[0];
   const status = an.budgetStatus(month, rate);
-  const cats = repo.getCategories().filter(c=>c.kind==='expense');
+  const tree = repo.getCatTree();   // budgets are set on leaf subcategories
   const totalBudget = status.reduce((a,b)=>a+b.amount,0);
   const totalSpent = status.reduce((a,b)=>a+b.spent,0);
   s.innerHTML = `
@@ -448,11 +465,13 @@ function renderBudgets(s){
       ${status.map(b=>`<div data-action="drill" data-cat="${b.category_id}" style="cursor:pointer">${budgetBar(b)}</div>`).join('')}
     </section>`:`<div class="empty"><div class="ei">🎯</div><h3>Postavi prve budžete</h3><p>Unesi mesečni limit za kategorije ispod — pratićeš napredak i upozorenja.</p></div>`}
     <section class="card">
-      <h3>Mesečni limiti po kategoriji</h3>
+      <h3>Mesečni limiti po potkategoriji</h3>
       <p class="muted small">Ostavi prazno da ukloniš budžet.</p>
-      ${cats.map(c=>{ const b=status.find(x=>x.category_id===c.id);
-        return `<div class="brow"><span>${esc(c.icon)} ${esc(c.name)}</span>
-          <input type="number" inputmode="numeric" class="binput" data-budget="${c.id}" placeholder="—" value="${b?Math.round(b.amount):''}"></div>`; }).join('')}
+      ${tree.map(g=>{ const subs=g.subs.filter(c=>c.kind==='expense'); if(!subs.length) return '';
+        return `<div class="catgrp-h" style="margin-top:8px">${esc(g.icon+' '+g.name)}</div>`
+          + subs.map(c=>{ const b=status.find(x=>x.category_id===c.id);
+            return `<div class="brow"><span>${esc(c.icon)} ${esc(c.name)}</span>
+              <input type="number" inputmode="numeric" class="binput" data-budget="${c.id}" placeholder="—" value="${b?Math.round(b.amount):''}"></div>`; }).join(''); }).join('')}
     </section>`;
   $('[data-bmonth]',s)?.addEventListener('change', e=>{ budgetMonth=e.target.value; render(); });
   s.querySelectorAll('[data-budget]').forEach(inp=> inp.addEventListener('change', async e=>{
@@ -613,18 +632,22 @@ function renderSettings(s){
     </section>`:''}
     <section class="card">
       <h3>Kategorije <small>${cats.length}</small></h3>
-      <p class="muted small">Dodirni kategoriju za izmenu (ime, boja, grupa) ili brisanje.</p>
-      <div class="cat-grid">
-        ${cats.map(c=>`<button class="catchip" data-action="edit-category" data-id="${c.id}" style="border-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('')}
-      </div>
-      <button data-action="add-category">＋ Nova kategorija</button>
+      <p class="muted small">Grupe i potkategorije. Dodirni za izmenu/brisanje; „＋ pot" dodaje potkategoriju u grupu.</p>
+      ${repo.getCatTree().map(g=>`<div class="catgrp">
+        <div class="catgrp-h">
+          <button class="catchip grp" data-action="edit-category" data-id="${g.id}" style="border-color:${g.color}">${esc(g.icon)} ${esc(g.name)}</button>
+          <button class="addsub" data-action="add-sub" data-id="${g.id}">＋ pot</button>
+        </div>
+        <div class="cat-grid">${g.subs.map(c=>`<button class="catchip" data-action="edit-category" data-id="${c.id}" style="border-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('') || '<span class="muted small">—</span>'}</div>
+      </div>`).join('')}
+      <button data-action="add-category" style="margin-top:8px">＋ Nova grupa</button>
     </section>
     <section class="card">
       <h3>Pravila kategorizacije <small>${rules.length}</small></h3>
       <p class="muted small">Ako opis/trgovac sadrži tekst → dodeli kategoriju.</p>
       <div class="form-row">
         <input id="rMatch" placeholder="Tekst (npr. LIDL)" />
-        <select id="rCat">${cats.map(c=>`<option value="${c.id}">${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
+        <select id="rCat">${catSelectOptions()}</select>
         <button class="primary" data-action="add-rule">Dodaj</button>
       </div>
       <button data-action="recat">↻ Primeni pravila i učenje na nekategorisane</button>
@@ -722,7 +745,7 @@ function addManualModal(opts={}){
       <label class="fld">Datum (može i raniji)<input id="mDate" type="date" value="${today}" max="${today}" /></label>
     </div>
     <div class="muted small" id="mCurHint"></div>
-    <select id="mCat">${cats.map(c=>`<option value="${c.id}" data-kind="${c.kind}">${esc(c.icon+' '+c.name)}</option>`).join('')}</select>
+    <select id="mCat">${catSelectOptions()}</select>
     <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="primary" id="mSave">Sačuvaj</button></div>
   `);
   let kind='expense';
@@ -761,7 +784,10 @@ function editCatModal(txId){
   const cats = repo.getCategories();
   const tx = db.get(`SELECT * FROM transactions WHERE id=?`,[txId]);
   const m = modal(`<h3>Kategorija</h3><div class="muted">${esc(tx.merchant||tx.description||'')}</div>
-    <div class="cat-pick">${cats.map(c=>`<button class="catp" data-cat="${c.id}" style="border-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('')}</div>
+    <div class="cat-tree">${repo.getCatTree().map(g=>
+      `<div class="ctg-h">${esc(g.icon+' '+g.name)}</div><div class="cat-pick">`
+      + g.subs.map(c=>`<button class="catp" data-cat="${c.id}" style="border-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('')
+      + `</div>`).join('')}</div>
     <div class="form-row"><button class="ghost" data-close>Zatvori</button>
     <button class="del-tx" data-action="del-tx" data-id="${txId}">🗑 Obriši transakciju</button></div>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
@@ -787,9 +813,11 @@ function categoryEditModal(id){
     ${sys?'<div class="muted small">Sistemska kategorija — naziv se ne može menjati ni obrisati (koristi se u analizi).</div>':''}
     <div class="form-row"><input id="ceIcon" value="${esc(c.icon||'')}" placeholder="🏷️" style="flex:0 0 64px;text-align:center" />
       <input id="ceName" value="${esc(c.name)}" placeholder="Naziv" ${sys?'disabled':''} /></div>
-    <select id="ceGrp"><option value="">— grupa (50/30/20) —</option>
+    <select id="ceGrp"><option value="">— tip (50/30/20) —</option>
       <option value="needs" ${c.grp==='needs'?'selected':''}>Potrebe</option>
       <option value="wants" ${c.grp==='wants'?'selected':''}>Želje</option></select>
+    ${db.all(`SELECT id FROM categories WHERE parent_id=?`,[id]).length ? '' :
+      `<select id="ceParent" style="margin-top:6px"><option value="">— bez grupe (sopstvena grupa) —</option>${groupSelectOptions(c.parent_id)}</select>`}
     <div class="muted small" style="margin-top:8px">Boja</div>
     <div class="accent-row">${CAT_COLORS.map(col=>`<button class="accent-dot ${c.color===col?'sel':''}" data-col="${col}" style="background:${col}"></button>`).join('')}</div>
     <div class="form-row" style="margin-top:10px"><button class="ghost" data-close>Otkaži</button><button class="primary" id="ceSave">Sačuvaj</button></div>
@@ -798,22 +826,26 @@ function categoryEditModal(id){
   m.querySelectorAll('[data-col]').forEach(b=>b.onclick=()=>{ color=b.dataset.col; m.querySelectorAll('[data-col]').forEach(x=>x.classList.toggle('sel',x===b)); });
   m.querySelector('[data-close]').onclick=()=>m.remove();
   m.querySelector('#ceSave').onclick=async()=>{ const name=m.querySelector('#ceName').value.trim(); if(!name) return;
-    try { repo.updateCategory(id,{ name, icon:m.querySelector('#ceIcon').value, color, grp:m.querySelector('#ceGrp').value||null }); }
+    const pe=m.querySelector('#ceParent'); const fields={ name, icon:m.querySelector('#ceIcon').value, color, grp:m.querySelector('#ceGrp').value||null };
+    if(pe) fields.parent_id = pe.value? +pe.value : null;
+    try { repo.updateCategory(id, fields); }
     catch(e){ toast(e.message==='exists'?'Kategorija sa tim imenom već postoji.':'Greška.', false); return; }
     await persist(); m.remove(); toast('Kategorija sačuvana.'); render(); };
   const del=m.querySelector('#ceDel');
   if(del) del.onclick=async()=>{ if(await confirmModal('Obrisati kategoriju? Njene transakcije se premeštaju u „Ostalo / Nekategorisano".')){
     if(repo.deleteCategory(id)){ await persist(); m.remove(); toast('Kategorija obrisana.'); render(); } else toast('Ova kategorija se ne može obrisati.',false); } };
 }
-function categoryAddModal(){
-  const m = modal(`<h3>Nova kategorija</h3>
+function categoryAddModal(parentId){
+  const m = modal(`<h3>Nova ${parentId?'potkategorija':'kategorija'}</h3>
     <div class="form-row"><input id="caIcon" value="🏷️" style="flex:0 0 64px;text-align:center" /><input id="caName" placeholder="Naziv" /></div>
-    <div class="form-row"><select id="caKind"><option value="expense">Rashod</option><option value="income">Prihod</option></select>
-      <select id="caGrp"><option value="">— grupa —</option><option value="needs">Potrebe</option><option value="wants">Želje</option></select></div>
+    <label class="fld">Grupa<select id="caParent"><option value="">— nova grupa (bez nadkategorije) —</option>${groupSelectOptions(parentId)}</select></label>
+    <div class="form-row"><select id="caKind"><option value="expense">Rashod</option><option value="income">Prihod</option><option value="transfer">Transfer</option></select>
+      <select id="caGrp"><option value="">— tip —</option><option value="needs">Potrebe</option><option value="wants">Želje</option></select></div>
     <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="primary" id="caSave">Dodaj</button></div>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
   m.querySelector('#caSave').onclick=async()=>{ const name=m.querySelector('#caName').value.trim(); if(!name) return;
-    try { repo.addCategory({ name, kind:m.querySelector('#caKind').value, icon:m.querySelector('#caIcon').value, grp:m.querySelector('#caGrp').value||null, color:'#6b7280' }); }
+    const pv=m.querySelector('#caParent').value;
+    try { repo.addCategory({ name, kind:m.querySelector('#caKind').value, icon:m.querySelector('#caIcon').value, grp:m.querySelector('#caGrp').value||null, color:'#6b7280', parent_id: pv?+pv:null }); }
     catch(e){ toast(e.message==='exists'?'Kategorija sa tim imenom već postoji.':'Greška.', false); return; }
     await persist(); m.remove(); toast('Kategorija dodata.'); render(); };
 }
@@ -954,6 +986,7 @@ async function onClick(e){
   else if(act==='edit-cat'){ editCatModal(+a.dataset.txid); }
   else if(act==='toggle-hide'){ db.setSetting('hide_amounts', hideAmounts()?'0':'1'); await persist(); applyPrefs(); const btn=$('[data-action="toggle-hide"]'); if(btn) btn.textContent=hideAmounts()?'🙈':'👁️'; }
   else if(act==='drill'){ if(a.dataset.cat){ clearFilters(); txFilter.category=+a.dataset.cat; view='tx'; render(); } }
+  else if(act==='drill-group'){ if(a.dataset.group){ clearFilters(); txFilter.group=+a.dataset.group; view='tx'; render(); } }
   else if(act==='acct'){ clearFilters(); txFilter.account=+a.dataset.acct; view='tx'; render(); }
   else if(act==='merch'){ clearFilters(); txFilter.q=a.dataset.merch; view='tx'; render(); }
   else if(act==='add-to-acct'){ addManualModal({ accountId:+a.dataset.acct }); }
@@ -981,6 +1014,7 @@ async function onClick(e){
   else if(act==='clear-filters'){ clearFilters(); showFilters=false; render(); }
   else if(act==='edit-category'){ categoryEditModal(+a.dataset.id); }
   else if(act==='add-category'){ categoryAddModal(); }
+  else if(act==='add-sub'){ categoryAddModal(+a.dataset.id); }
   else if(act==='set-accent'){ db.setSetting('accent', a.dataset.color); await persist(); applyPrefs(); render(); }
   else if(act==='do-update'){ doUpdate(); }
   else if(act==='confirm-import'){ a.disabled=true; a.textContent='Uvozim…'; await confirmImport(); }

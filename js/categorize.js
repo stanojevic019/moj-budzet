@@ -25,40 +25,69 @@ export function cleanMerchant(counterparty, description){
   return s;
 }
 
-// kind: 'expense' | 'income' | 'transfer'; grp: 'needs' | 'wants' | null (for 50/30/20)
+// [name, kind, color, icon, grp(needs|wants|null), parentName(null=top-level group)]
+// Two levels: top-level GROUPS (parent null) each with leaf SUBCATEGORIES.
 export const SEED_CATEGORIES = [
-  // — rashodi —
-  ['Namirnice','expense','#22c55e','🛒','needs'],
-  ['Restorani i kafići','expense','#f97316','🍽️','wants'],
-  ['Automobil i prevoz','expense','#eab308','🚗','needs'],   // gorivo + putarina/parking + taksi/gradski
-  ['Računi i režije','expense','#14b8a6','🧾','needs'],
-  ['Telefon i internet','expense','#0ea5e9','📱','needs'],
-  ['Zdravlje i apoteka','expense','#ef4444','💊','needs'],
-  ['Lična nega','expense','#db2777','🧴','wants'],            // drogerija/kozmetika + frizer/salon
-  ['Pretplate i digitalne usluge','expense','#8b5cf6','📺','wants'],
-  ['Šoping','expense','#f43f5e','🛍️','wants'],
-  ['Odeća i obuća','expense','#e11d48','👕','wants'],
-  ['Dom i domaćinstvo','expense','#0891b2','🏠','needs'],
-  ['Zabava','expense','#a21caf','🎬','wants'],
-  ['Sport i rekreacija','expense','#65a30d','🏋️','wants'],
-  ['Putovanja','expense','#06b6d4','✈️','wants'],
-  ['Obrazovanje','expense','#1d4ed8','🎓','needs'],
-  ['Deca','expense','#f59e0b','🧸','needs'],
-  ['Pokloni i donacije','expense','#fb7185','🎁',null],
-  ['Obaveze (porezi/osiguranje)','expense','#475569','🏛️','needs'],
-  ['Podizanje keša','expense','#64748b','🏧',null],
-  ['Bankarske naknade','expense','#94a3b8','🏦','needs'],
-  ['Kredit – kamata','expense','#b91c1c','💳','needs'],
-  ['Kredit – glavnica','expense','#7f1d1d','💳',null],
-  ['Ostalo / Nekategorisano','expense','#6b7280','❓',null],
-  // — transferi —
-  ['Transfer drugima','transfer','#f59e0b','↗️',null],
-  ['Interni prenos','transfer','#3b82f6','🔁',null],
-  ['Menjačnica (devize)','transfer','#0d9488','💱',null],
-  ['Štednja i ulaganja','transfer','#16a34a','📈',null],
-  // — prilivi —
-  ['Zarada','income','#16a34a','💼',null],
-  ['Ostali prilivi','income','#10b981','⬇️',null],
+  // ===== GROUPS =====
+  ['Hrana','expense','#22c55e','🍽️',null,null],
+  ['Vozilo i prevoz','expense','#eab308','🚗',null,null],
+  ['Stanovanje','expense','#14b8a6','🏠',null,null],
+  ['Zdravlje i nega','expense','#ef4444','💊',null,null],
+  ['Kupovina','expense','#f43f5e','🛍️',null,null],
+  ['Slobodno vreme','expense','#a21caf','🎬',null,null],
+  ['Porodica','expense','#fb7185','👨‍👩‍👧',null,null],
+  ['Obaveze i finansije','expense','#94a3b8','🏦',null,null],
+  ['Gotovina i transferi','transfer','#64748b','🔁',null,null],
+  ['Prihodi','income','#16a34a','💼',null,null],
+  ['Ostalo','expense','#6b7280','❓',null,null],
+  // ===== SUBCATEGORIES =====
+  // Hrana
+  ['Namirnice','expense','#22c55e','🛒','needs','Hrana'],
+  ['Restorani i kafići','expense','#f97316','🍽️','wants','Hrana'],
+  ['Dostava hrane','expense','#fb923c','🛵','wants','Hrana'],
+  // Vozilo i prevoz
+  ['Gorivo','expense','#eab308','⛽','needs','Vozilo i prevoz'],
+  ['Servis i delovi','expense','#ca8a04','🔧','needs','Vozilo i prevoz'],
+  ['Registracija','expense','#a16207','📋','needs','Vozilo i prevoz'],
+  ['Putarina i parking','expense','#a3a3a3','🅿️','needs','Vozilo i prevoz'],
+  ['Taksi i gradski prevoz','expense','#0ea5e9','🚕','needs','Vozilo i prevoz'],
+  // Stanovanje
+  ['Računi i režije','expense','#14b8a6','🧾','needs','Stanovanje'],
+  ['Telefon i internet','expense','#0ea5e9','📱','needs','Stanovanje'],
+  ['Dom i domaćinstvo','expense','#0891b2','🏠','needs','Stanovanje'],
+  ['Kirija','expense','#0e7490','🔑','needs','Stanovanje'],
+  // Zdravlje i nega
+  ['Zdravlje i apoteka','expense','#ef4444','💊','needs','Zdravlje i nega'],
+  ['Lična nega','expense','#db2777','🧴','wants','Zdravlje i nega'],
+  ['Sport i rekreacija','expense','#65a30d','🏋️','wants','Zdravlje i nega'],
+  // Kupovina
+  ['Šoping','expense','#f43f5e','🛍️','wants','Kupovina'],
+  ['Odeća i obuća','expense','#e11d48','👕','wants','Kupovina'],
+  ['Tehnika','expense','#7c3aed','💻','wants','Kupovina'],
+  // Slobodno vreme
+  ['Zabava','expense','#a21caf','🎬','wants','Slobodno vreme'],
+  ['Pretplate i digitalne usluge','expense','#8b5cf6','📺','wants','Slobodno vreme'],
+  ['Putovanja','expense','#06b6d4','✈️','wants','Slobodno vreme'],
+  // Porodica
+  ['Deca','expense','#f59e0b','🧸','needs','Porodica'],
+  ['Obrazovanje','expense','#1d4ed8','🎓','needs','Porodica'],
+  ['Pokloni i donacije','expense','#fb7185','🎁',null,'Porodica'],
+  // Obaveze i finansije
+  ['Kredit – kamata','expense','#b91c1c','💳','needs','Obaveze i finansije'],
+  ['Kredit – glavnica','expense','#7f1d1d','💳',null,'Obaveze i finansije'],
+  ['Bankarske naknade','expense','#94a3b8','🏦','needs','Obaveze i finansije'],
+  ['Obaveze (porezi/osiguranje)','expense','#475569','🏛️','needs','Obaveze i finansije'],
+  // Gotovina i transferi
+  ['Podizanje keša','expense','#64748b','🏧',null,'Gotovina i transferi'],
+  ['Transfer drugima','transfer','#f59e0b','↗️',null,'Gotovina i transferi'],
+  ['Interni prenos','transfer','#3b82f6','🔁',null,'Gotovina i transferi'],
+  ['Menjačnica (devize)','transfer','#0d9488','💱',null,'Gotovina i transferi'],
+  ['Štednja i ulaganja','transfer','#16a34a','📈',null,'Gotovina i transferi'],
+  // Prihodi
+  ['Zarada','income','#16a34a','💼',null,'Prihodi'],
+  ['Ostali prilivi','income','#10b981','⬇️',null,'Prihodi'],
+  // Ostalo
+  ['Ostalo / Nekategorisano','expense','#6b7280','❓',null,'Ostalo'],
 ];
 
 // Rules: [matchText(UPPERCASE substring), categoryName, priority]. Lower priority wins.
@@ -108,16 +137,16 @@ export const SEED_RULES = [
   ['SBB','Telefon i internet',2],
   ['A1 ','Telefon i internet',2],
   // fuel
-  ['OMV','Automobil i prevoz',2],
-  ['MOL ','Automobil i prevoz',2],
-  ['NIS A.D','Automobil i prevoz',2],
-  ['NIS PETROL','Automobil i prevoz',2],
-  ['EKO SERBIA','Automobil i prevoz',2],
-  ['GAZPROM','Automobil i prevoz',2],
-  ['LUKOIL','Automobil i prevoz',2],
-  ['KNEZ PETROL','Automobil i prevoz',2],
-  ['DUDA INVEST BS','Automobil i prevoz',2],
-  ['BS MALA KRSNA','Automobil i prevoz',2],
+  ['OMV','Gorivo',2],
+  ['MOL ','Gorivo',2],
+  ['NIS A.D','Gorivo',2],
+  ['NIS PETROL','Gorivo',2],
+  ['EKO SERBIA','Gorivo',2],
+  ['GAZPROM','Gorivo',2],
+  ['LUKOIL','Gorivo',2],
+  ['KNEZ PETROL','Gorivo',2],
+  ['DUDA INVEST BS','Gorivo',2],
+  ['BS MALA KRSNA','Gorivo',2],
   // groceries
   ['C MARKET','Namirnice',2],
   ['MAXI','Namirnice',2],
@@ -146,9 +175,9 @@ export const SEED_RULES = [
   // drogerie
   ['DM FILIJALA','Lična nega',2],
   // tolls
-  ['JP PUTEVI','Automobil i prevoz',1],
-  ['PUTEVI SRBIJE','Automobil i prevoz',1],
-  ['PARKING','Automobil i prevoz',2],
+  ['JP PUTEVI','Putarina i parking',1],
+  ['PUTEVI SRBIJE','Putarina i parking',1],
+  ['PARKING','Putarina i parking',2],
   // restaurants / cafes / delivery
   ['WOLT','Restorani i kafići',2],
   ['GLOVO','Restorani i kafići',2],
