@@ -141,6 +141,11 @@ function enterApp(){
       ${tab('settings','⚙️','Više')}
     </nav>`;
   if(updateReady){ const b=$('#updateBanner'); if(b) b.classList.remove('hidden'); }
+  // one-time: after a migration that added rules, re-categorize the "Ostalo" backlog
+  if(db.getSetting('recat_pending')==='1'){
+    const n = repo.recategorizeAll(true); db.setSetting('recat_pending','0'); persist();
+    if(n) setTimeout(()=>toast(`Auto-kategorizovano ${n} stavki novim pravilima.`), 700);
+  }
   resetAutoLock();
   render();
 }

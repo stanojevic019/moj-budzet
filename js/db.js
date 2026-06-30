@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -315,6 +315,35 @@ function migrate(){
     ensureCat('Tehnika','expense','#7c3aed','💻','wants',groups['Kupovina']);
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','8') ON CONFLICT(key) DO UPDATE SET value='8'`);
     v = 8;
+  }
+  if(v < 9){
+    // rules derived from the user's statements (new match-texts → safe to backfill)
+    const addRules = [['CARSKI POH','Restorani i kafići',2],['YUMMY MOMO','Restorani i kafići',2],['VIP CATERING','Restorani i kafići',2],
+      ['IDOLBAR','Restorani i kafići',2],['MASNICA','Restorani i kafići',2],['CATERING','Restorani i kafići',3],['RESTORAN','Restorani i kafići',3],
+      ['GRMEC','Restorani i kafići',3],['PLANET TYRES','Servis i delovi',2],['TYRES','Servis i delovi',3],['GUME','Servis i delovi',2],
+      ['VULKANIZER','Servis i delovi',2],['MOTO - BIKE','Servis i delovi',2],['MOTO-BIKE','Servis i delovi',2],['POLOVNI AUTOMOBILI','Servis i delovi',2],
+      ['AUTO DELOVI','Servis i delovi',2],['AUTODELOVI','Servis i delovi',2],['TICKET VISION','Zabava',2],['METROPOLIS MUSIC','Zabava',2],
+      ['MOZZART','Zabava',2],['BIOSKOP','Zabava',2],['CINEPLEXX','Zabava',2],['POZORI','Zabava',2],['SEPHORA','Lična nega',2],['NOTINO','Lična nega',2],
+      ['FRIZER','Lična nega',2],['JAVNO KOMUNALNO','Računi i režije',2],['JKP','Računi i režije',3],['200-2206180101','Računi i režije',2],
+      ['190-99870','Računi i režije',2],['NAPLATNA RAMP','Putarina i parking',2],['DOMACA TRGOVINA','Šoping',3],['WATCHES','Šoping',2]];
+    for(const [mt, cat, pr] of addRules){
+      if(get(`SELECT id FROM rules WHERE match=?`, [mt])) continue;
+      const c = get(`SELECT id FROM categories WHERE name=?`, [cat]); if(!c) continue;
+      db.run(`INSERT INTO rules(match,category_id,priority) VALUES(?,?,?)`, [mt, c.id, pr]);
+    }
+    // remove unused subcategories (only if empty — no tx, no budget)
+    for(const name of ['Dostava hrane','Registracija','Taksi i gradski prevoz','Kirija','Dom i domaćinstvo',
+      'Sport i rekreacija','Putovanja','Obrazovanje','Deca','Obaveze (porezi/osiguranje)','Štednja i ulaganja']){
+      const r = get(`SELECT id FROM categories WHERE name=?`, [name]); if(!r) continue;
+      if(get(`SELECT COUNT(*) AS c FROM transactions WHERE category_id=?`, [r.id]).c > 0) continue;
+      if(get(`SELECT id FROM budgets WHERE category_id=?`, [r.id])) continue;
+      db.run(`DELETE FROM rules WHERE category_id=?`, [r.id]);
+      db.run(`DELETE FROM learned WHERE category_id=?`, [r.id]);
+      db.run(`DELETE FROM categories WHERE id=?`, [r.id]);
+    }
+    setSetting('recat_pending','1');   // app re-runs categorization on uncategorized once
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','9') ON CONFLICT(key) DO UPDATE SET value='9'`);
+    v = 9;
   }
 }
 
