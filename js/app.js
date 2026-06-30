@@ -220,6 +220,13 @@ function renderDashboard(s){
   const nwsAll = an.netWorthSeries(rate);
   const nws = nwsAll.filter(x=> x.month>=range.from && x.month<=range.to);   // clip net-worth line to the period
   const nwTrend = nws.length>1 ? nws[nws.length-1].net - nws[nws.length-2].net : 0;
+  // net worth as of the END of the period, the change (Δ) during it, and the
+  // reconciliation: startNW + realIncome − realSpending + otherFlows = endNW
+  const endNW = (nwsAll.find(x=>x.month===range.to) || { net: nw.totalRSD }).net;
+  const pcond = range.preset==='all' ? '' : `WHERE substr(date,1,7) BETWEEN '${range.from}' AND '${range.to}'`;
+  const nwDelta = db.get(`SELECT COALESCE(SUM(amount*${an.convExpr(rate)}),0) AS d FROM transactions ${pcond}`).d;
+  const startNW = endNW - nwDelta;
+  const otherFlows = nwDelta - pNet;   // transfers / cash / FX / loan principal (excluded from spending & income)
   const ww = an.needsWants(periodObj, rate);
   const proj = range.single ? an.projection(range.to, rate, todayISO()) : null;
   const budgets = an.budgetStatus(periodObj, rate, range.single?1:range.months);
@@ -243,7 +250,7 @@ function renderDashboard(s){
     <div class="muted small period-note">📊 Statistika za: <b>${esc(range.label)}</b>${range.single?'':` · ${range.months} mes.`}</div>
 
     <div class="kpis">
-      ${kpi('Neto vrednost', fmt(nw.totalRSD), `${balances.length} računa →`, '', 'data-action="goto" data-view="accounts"')}
+      ${kpi('Neto vrednost'+(range.preset==='all'||range.to===m[m.length-1].month?'':' · '+P.label), fmt(endNW), `${nwDelta>=0?'▲':'▼'} ${fmtN(Math.abs(nwDelta))} u periodu →`, '', 'data-action="goto" data-view="accounts"')}
       ${kpi('Priliv · '+P.label, fmt(P.realIncome), 'prihodi u periodu →', 'good', 'data-action="kpi-income"')}
       ${kpi('Potrošnja · '+P.label, fmt(P.spending), P.momSpend==null?'rasčlani →':`${P.momSpend<=0?'📉':'📈'} ${pct(P.momSpend)} vs pret. period`, P.momSpend>0?'bad':'good', 'data-action="kpi-spend"')}
       ${kpi('Štednja · '+P.label, fmt(P.net), P.savingsRate==null?'rasčlani →':`stopa štednje ${P.savingsRate.toFixed(0)}%`, P.net>=0?'good':'bad', 'data-action="kpi-save"')}
@@ -274,6 +281,16 @@ function renderDashboard(s){
     <section class="card">
       <h3>Neto vrednost kroz vreme ${nwTrend>=0?'<span class="pos">📈</span>':'<span class="neg">📉</span>'}</h3>
       <div class="chart-wrap"><canvas id="cNW"></canvas></div>
+    </section>
+
+    <section class="card nw-bridge">
+      <h3>🧮 Kako se slaže neto vrednost · ${range.label}</h3>
+      <div class="rec-row"><div>${range.preset==='all'?'Početna stanja računa':'Neto na početak perioda'}</div><b>${fmt(startNW)}</b></div>
+      <div class="rec-row"><div>＋ Realni prihodi</div><b class="pos">+${fmtN(pIncome)}</b></div>
+      <div class="rec-row"><div>− Realna potrošnja</div><b class="neg">−${fmtN(pSpending)}</b></div>
+      <div class="rec-row"><div>± Transferi · keš · krediti</div><b class="${otherFlows<0?'neg':'pos'}">${otherFlows<0?'−':'+'}${fmtN(Math.abs(otherFlows))}</b></div>
+      <div class="rec-row" style="border-top:1px solid var(--line)"><div><b>Neto vrednost na kraj</b></div><b>${fmt(endNW)}</b></div>
+      <div class="muted small" style="margin-top:6px">Štednja (${fmt(pNet)}) = prihodi − potrošnja. Neto vrednost se razlikuje od štednje za početno stanje i za transfere/keš/kredite (nisu „prava" potrošnja).</div>
     </section>
 
     <section class="card">
@@ -694,7 +711,12 @@ function renderSettings(s){
     </section>
     <section class="card">
       <h3>Izvoz podataka</h3>
-      <div class="form-row">
+      <div class="muted small">Opseg</div>
+      <select id="expScope">
+        <option value="all">Sve vreme</option>
+        ${dashRange && dashRange.preset!=='all' ? `<option value="period">Izabrani period (${esc(dashRange.label)})</option>` : ''}
+      </select>
+      <div class="form-row" style="margin-top:8px">
         <button data-action="export-xlsx">📊 Excel (.xlsx)</button>
         <button data-action="export-csv">📄 CSV</button>
       </div>
@@ -770,25 +792,32 @@ function renderSettings(s){
 }
 
 // =================================================================== EXPORT
-function exportRows(){
+function exportRows(period){
+  const cond = (period && period.from && period.to) ? `WHERE substr(t.date,1,7) BETWEEN '${period.from}' AND '${period.to}'` : '';
   return db.all(`SELECT t.date AS Datum, a.name AS Racun, t.currency AS Valuta,
     CASE WHEN t.amount>0 THEN t.amount ELSE NULL END AS Priliv,
     CASE WHEN t.amount<0 THEN -t.amount ELSE NULL END AS Rashod,
     c.name AS Kategorija, t.merchant AS Trgovac, t.description AS Opis, t.balance AS Stanje, t.source AS Izvor
     FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id LEFT JOIN categories c ON c.id=t.category_id
-    ORDER BY t.date, t.id`);
+    ${cond} ORDER BY t.date, t.id`);
 }
-function exportXlsx(){
-  const rows = exportRows();
+// scope chosen in the Settings export card: null = all, else the active dashboard period
+function exportPeriod(){
+  const sel = $('#expScope');
+  if(sel && sel.value==='period' && dashRange && dashRange.preset!=='all') return { from:dashRange.from, to:dashRange.to };
+  return null;
+}
+function exportXlsx(period){
+  const rows = exportRows(period);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Transakcije');
-  // monthly summary sheet
-  const m = an.monthly(rates()).map(x=>({ Mesec:x.month, Prihodi:Math.round(x.realIncome), Rashodi:Math.round(x.spending), Stednja:Math.round(x.net) }));
+  // monthly summary sheet (same scope)
+  const m = an.monthly(rates(), period).map(x=>({ Mesec:x.month, Prihodi:Math.round(x.realIncome), Rashodi:Math.round(x.spending), Stednja:Math.round(x.net) }));
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(m), 'Po mesecima');
   XLSX.writeFile(wb, `moj-budzet-${new Date().toISOString().slice(0,10)}.xlsx`);
 }
-function exportCsv(){
-  const rows = exportRows();
+function exportCsv(period){
+  const rows = exportRows(period);
   const ws = XLSX.utils.json_to_sheet(rows);
   const csv = XLSX.utils.sheet_to_csv(ws);
   const blob = new Blob(['﻿'+csv], {type:'text/csv;charset=utf-8'});
@@ -970,6 +999,20 @@ function acctSpendRows(period, rate){
   return rows.map(r=>`<div class="rec-row" data-action="acct" data-acct="${r.id}"><div>${esc(r.name)}</div><b>${fmt(r.tot)}</b></div>`).join('')
     || '<div class="muted small">—</div>';
 }
+// Per-account "real income" for a period (RSD base, excludes transfers/FX).
+function acctIncomeRows(period, rate){
+  const conv = an.convExpr(rate, 't.currency');
+  const excl = an.EXCLUDE_INCOME.map(n=>`'${n}'`).join(',');
+  const cond = period==null ? '' : (typeof period==='string'
+    ? `AND substr(t.date,1,7)='${period}'`
+    : `${period.from?` AND substr(t.date,1,7)>='${period.from}'`:''}${period.to?` AND substr(t.date,1,7)<='${period.to}'`:''}`);
+  const rows = db.all(`SELECT a.id,a.name, COALESCE(SUM(t.amount*${conv}),0) AS tot
+    FROM accounts a JOIN transactions t ON t.account_id=a.id JOIN categories c ON c.id=t.category_id
+    WHERE a.archived=0 AND t.amount>0 ${cond} AND c.name NOT IN (${excl})
+    GROUP BY a.id HAVING tot>0 ORDER BY tot DESC`);
+  return rows.map(r=>`<div class="rec-row" data-action="acct" data-acct="${r.id}"><div>${esc(r.name)}</div><b class="pos">+${fmt(r.tot)}</b></div>`).join('')
+    || '<div class="muted small">—</div>';
+}
 // Dashboard KPI breakdown (decompose a headline number) — honors the selected period.
 function statsModal(metric){
   const rate = rates();
@@ -992,6 +1035,14 @@ function statsModal(metric){
         <div style="text-align:right"><b>${fmt(a.avgSpend,a.currency)}</b><br><small>štednja <span class="${a.avgNet<0?'neg':'pos'}">${fmt(a.avgNet,a.currency)}</span></small></div>
       </div>`).join('') || '<div class="muted small">Nema podataka.</div>')
       + `<div class="muted small" style="margin-top:8px">Ukupno (RSD): Ø potrošnja ${fmt(pSpending/monthsData)} · Ø štednja ${fmt(pNet/monthsData)} /mes</div>`;
+  } else if(metric==='income'){
+    title = 'Priliv · '+label;
+    const exI = new Set(an.EXCLUDE_INCOME);
+    const cats = an.categoryBreakdown(periodObj,'income',rate).filter(c=>!exI.has(c.name)).slice(0,12);
+    body = `<div class="muted small">Po kategoriji</div>`
+      + (cats.map(c=>`<div class="rec-row" data-action="drill" data-cat="${c.id}"><div>${esc(c.icon)} ${esc(c.name)}</div><b class="pos">+${fmt(c.total)}</b></div>`).join('') || '<div class="muted small">—</div>')
+      + `<div class="muted small" style="margin-top:10px">Po računu</div>` + acctIncomeRows(periodObj, rate)
+      + `<div class="muted small" style="margin-top:8px">Ukupno realni priliv: <b>${fmt(pIncome)}</b></div>`;
   } else if(metric==='spend'){
     title = 'Potrošnja · '+label;
     const cats = an.categoryBreakdown(periodObj,'expense',rate).filter(c=>!exSet.has(c.name)).slice(0,12);
@@ -1092,7 +1143,7 @@ async function onClick(e){
   else if(act==='kpi-spend'){ statsModal('spend'); }
   else if(act==='kpi-save'){ statsModal('save'); }
   else if(act==='kpi-avg'){ statsModal('avg'); }
-  else if(act==='kpi-income'){ clearFilters(); applyDashPeriod(); txFilter.type='income'; view='tx'; render(); }
+  else if(act==='kpi-income'){ statsModal('income'); }
   else if(act==='del-filtered'){
     const { whereSql, params } = buildTxWhere();
     const n = repo.countWhere(whereSql, params);
@@ -1126,8 +1177,8 @@ async function onClick(e){
   }
   else if(act==='del-rule'){ repo.deleteRule(+a.dataset.id); await persist(); render(); }
   else if(act==='recat'){ const n=repo.recategorizeAll(true); await persist(); toast(`Ažurirano ${n} transakcija.`); render(); }
-  else if(act==='export-xlsx'){ exportXlsx(); }
-  else if(act==='export-csv'){ exportCsv(); }
+  else if(act==='export-xlsx'){ exportXlsx(exportPeriod()); }
+  else if(act==='export-csv'){ exportCsv(exportPeriod()); }
   else if(act==='change-pass'){
     const p1=$('#np1').value, p2=$('#np2').value;
     if(p1.length<6){ toast('Lozinka mora imati bar 6 znakova.',false); return; }
