@@ -1,6 +1,6 @@
 // Offline service worker: cache-first for the app shell + libraries.
 // Bump CACHE when files change to force an update.
-const CACHE = 'moj-budzet-v25';
+const CACHE = 'moj-budzet-v26';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest',
   './css/style.css',

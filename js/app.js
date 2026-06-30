@@ -32,11 +32,12 @@ function pct(n){ return (n>=0?'+':'') + (n==null?'–':n.toFixed(0)) + '%'; }
 const esc = (s) => (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const todayLocal = () => { const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); };
 // grouped <select> options (optgroup per category group, subcategories as options)
-function catSelectOptions(selectedId){
+function catSelectOptions(selectedId, kind){
   return repo.getCatTree().map(g => {
-    if(!g.subs.length) return '';
+    const subs = kind ? g.subs.filter(c=>c.kind===kind) : g.subs;
+    if(!subs.length) return '';
     return `<optgroup label="${esc(g.icon+' '+g.name)}">`
-      + g.subs.map(c=>`<option value="${c.id}" ${selectedId==c.id?'selected':''}>${esc(c.icon+' '+c.name)}</option>`).join('')
+      + subs.map(c=>`<option value="${c.id}" ${selectedId==c.id?'selected':''}>${esc(c.icon+' '+c.name)}</option>`).join('')
       + `</optgroup>`;
   }).join('');
 }
@@ -703,6 +704,7 @@ function renderSettings(s){
   const rules = db.all(`SELECT r.*, c.name AS cat, c.icon FROM rules r JOIN categories c ON c.id=r.category_id ORDER BY r.priority, r.match`);
   const batches = repo.getImportBatches();
   const al = autolockMin();
+  const cashN = repo.unmirroredCashCount();
   s.innerHTML = `
     <section class="card">
       <h3>📥 Uvoz izvoda</h3>
@@ -766,6 +768,9 @@ function renderSettings(s){
       <select id="mirrorToggle">
         ${[['1','Uključeno'],['0','Isključeno']].map(([v,l])=>`<option value="${v}" ${db.getSetting('mirror_atm','0')===v?'selected':''}>${l}</option>`).join('')}
       </select>
+      <button class="ghost" data-action="add-wallet-cash" style="width:100%;margin-top:10px">＋ Dodaj keš u Novčanik</button>
+      ${cashN>0?`<div class="muted small" style="margin-top:12px">Imaš <b>${cashN}</b> podizanja keša koja nisu u Novčaniku. Pošto taj keš nije praćen, možeš ga označiti kao stvaran trošak:</div>
+      <button class="ghost" data-action="cash-as-expense" style="width:100%;margin-top:6px">💵 Neevidentiran keš → trošak (${cashN})</button>`:''}
     </section>
     <section class="card">
       <h3>🔒 Sigurnost</h3>
@@ -848,9 +853,10 @@ function addManualModal(opts={}){
   const accounts = repo.getAccounts();
   const cats = repo.getCategories();
   const today = todayLocal();
+  let kind = opts.kind || 'expense';
   const m = modal(`
     <h3>Nova transakcija</h3>
-    <div class="seg"><button class="seg-b active" data-kind="expense">Rashod</button><button class="seg-b" data-kind="income">Prihod</button></div>
+    <div class="seg"><button class="seg-b ${kind==='expense'?'active':''}" data-kind="expense">Rashod</button><button class="seg-b ${kind==='income'?'active':''}" data-kind="income">Prihod</button></div>
     <input id="mAmt" type="number" inputmode="decimal" placeholder="Iznos" />
     <input id="mDesc" placeholder="Opis / trgovac" />
     <label class="fld">Račun<select id="mAcc">${accounts.map(a=>`<option value="${a.id}" ${opts.accountId==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
@@ -859,11 +865,12 @@ function addManualModal(opts={}){
       <label class="fld">Datum (može i raniji)<input id="mDate" type="date" value="${today}" max="${today}" /></label>
     </div>
     <div class="muted small" id="mCurHint"></div>
-    <select id="mCat">${catSelectOptions()}</select>
+    <label class="fld">Kategorija<select id="mCat">${catSelectOptions(opts.categoryId, kind)}</select></label>
     <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="primary" id="mSave">Sačuvaj</button></div>
   `);
-  let kind='expense';
-  m.querySelectorAll('.seg-b').forEach(b=> b.onclick=()=>{ kind=b.dataset.kind; m.querySelectorAll('.seg-b').forEach(x=>x.classList.toggle('active',x===b)); });
+  // category list follows the selected kind (Rashod → rashodne, Prihod → prihodne)
+  m.querySelectorAll('.seg-b').forEach(b=> b.onclick=()=>{ kind=b.dataset.kind; m.querySelectorAll('.seg-b').forEach(x=>x.classList.toggle('active',x===b));
+    m.querySelector('#mCat').innerHTML = catSelectOptions(null, kind); });
   m.querySelector('[data-close]').onclick=()=>m.remove();
   const accSel=m.querySelector('#mAcc'), curSel=m.querySelector('#mCur'), hint=m.querySelector('#mCurHint');
   // Currency follows the account; for the cash "slamarica" it's free to choose
@@ -1177,6 +1184,13 @@ async function onClick(e){
   }
   else if(act==='del-rule'){ repo.deleteRule(+a.dataset.id); await persist(); render(); }
   else if(act==='recat'){ const n=repo.recategorizeAll(true); await persist(); toast(`Ažurirano ${n} transakcija.`); render(); }
+  else if(act==='add-wallet-cash'){ const w=repo.findOrCreateWallet('RSD'); await persist(); addManualModal({ accountId:w.id, kind:'income' }); }
+  else if(act==='cash-as-expense'){
+    const n=repo.unmirroredCashCount();
+    if(n>0 && await confirmModal(`Označiti ${n} podizanja keša (koja nisu u Novčaniku) kao stvaran trošak? Prebacuju se u kategoriju „Gotovina (keš)".`, `Označi ${n}`)){
+      repo.cashWithdrawalsToExpense(); await persist(); toast(`${n} podizanja keša označeno kao trošak.`); render();
+    }
+  }
   else if(act==='export-xlsx'){ exportXlsx(exportPeriod()); }
   else if(act==='export-csv'){ exportCsv(exportPeriod()); }
   else if(act==='change-pass'){
