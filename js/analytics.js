@@ -207,11 +207,12 @@ export function categoryMovers(curPeriod, prevPeriod, rates){
 
 // ---------- per-account stats (in each account's own currency) ----------
 // avgSpend = avg monthly real spending; avgNet = avg monthly savings (real income − real spending).
-export function accountStats(){
+export function accountStats(period){
   const accts = db.all(`SELECT id,name,currency,color,type FROM accounts WHERE archived=0`);
   const cats = catLookup();
   const exS = new Set(EXCLUDE_SPENDING), exI = new Set(EXCLUDE_INCOME);
-  const rows = db.all(`SELECT account_id, substr(date,1,7) AS m, amount, category_id FROM transactions`);
+  const { cond, params } = monthCond(period);
+  const rows = db.all(`SELECT account_id, substr(date,1,7) AS m, amount, category_id FROM transactions ${cond?'WHERE '+cond:''}`, params);
   const agg = {};
   for(const r of rows){
     const o = agg[r.account_id] || (agg[r.account_id] = { months:new Set(), spend:{}, net:{}, inSum:0, outSum:0 });

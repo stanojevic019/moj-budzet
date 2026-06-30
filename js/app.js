@@ -956,51 +956,61 @@ function accountEditModal(id){
     repo.deleteAccount(id); await persist(); m.remove(); toast('Račun obrisan.'); render(); } };
 }
 
-// Per-account "real spending" for a month (RSD base, excludes transfers/cash/FX/principal).
-function acctSpendRows(month, rate){
+// Per-account "real spending" for a period (RSD base, excludes transfers/cash/FX/principal).
+function acctSpendRows(period, rate){
   const conv = an.convExpr(rate, 't.currency');   // accounts also has `currency` → qualify
   const excl = an.EXCLUDE_SPENDING.map(n=>`'${n}'`).join(',');
+  const cond = period==null ? '' : (typeof period==='string'
+    ? `AND substr(t.date,1,7)='${period}'`
+    : `${period.from?` AND substr(t.date,1,7)>='${period.from}'`:''}${period.to?` AND substr(t.date,1,7)<='${period.to}'`:''}`);
   const rows = db.all(`SELECT a.id,a.name, COALESCE(SUM(ABS(t.amount)*${conv}),0) AS tot
     FROM accounts a JOIN transactions t ON t.account_id=a.id JOIN categories c ON c.id=t.category_id
-    WHERE a.archived=0 AND t.amount<0 AND substr(t.date,1,7)=? AND c.name NOT IN (${excl})
-    GROUP BY a.id HAVING tot>0 ORDER BY tot DESC`, [month]);
+    WHERE a.archived=0 AND t.amount<0 ${cond} AND c.name NOT IN (${excl})
+    GROUP BY a.id HAVING tot>0 ORDER BY tot DESC`);
   return rows.map(r=>`<div class="rec-row" data-action="acct" data-acct="${r.id}"><div>${esc(r.name)}</div><b>${fmt(r.tot)}</b></div>`).join('')
     || '<div class="muted small">—</div>';
 }
-// Dashboard KPI breakdown (decompose a headline number, like net worth → accounts).
+// Dashboard KPI breakdown (decompose a headline number) — honors the selected period.
 function statsModal(metric){
   const rate = rates();
-  const k = an.kpis(rate); if(!k) return;
-  const month = k.current.month, label = k.current.label;
+  const range = dashRange || { from:null, to:null, label:'sve vreme', single:false, months:1, preset:'all' };
+  const periodObj = range.preset==='all' ? null : (range.single ? range.from : { from:range.from, to:range.to });
+  const mw = an.monthly(rate, range.preset==='all' ? null : { from:range.from, to:range.to });
+  const pSpending = mw.reduce((s,x)=>s+x.spending,0);
+  const pIncome   = mw.reduce((s,x)=>s+x.realIncome,0);
+  const pNet      = mw.reduce((s,x)=>s+x.net,0);
+  const monthsData = mw.length || 1;
+  const savingsRate = pIncome ? pNet/pIncome*100 : null;
+  const label = range.label;
   const exSet = new Set(an.EXCLUDE_SPENDING);
   let title='', body='';
   if(metric==='avg'){
-    title = 'Prosečno mesečno — po računu';
-    const st = an.accountStats().filter(a=>a.months>0);
+    title = 'Prosečno mesečno — po računu · '+label;
+    const st = an.accountStats(periodObj).filter(a=>a.months>0);
     body = (st.map(a=>`<div class="rec-row" data-action="acct" data-acct="${a.id}">
         <div>${esc(a.name)}<small>${a.months} mes.</small></div>
         <div style="text-align:right"><b>${fmt(a.avgSpend,a.currency)}</b><br><small>štednja <span class="${a.avgNet<0?'neg':'pos'}">${fmt(a.avgNet,a.currency)}</span></small></div>
       </div>`).join('') || '<div class="muted small">Nema podataka.</div>')
-      + `<div class="muted small" style="margin-top:8px">Ukupno (RSD): Ø potrošnja ${fmt(k.avgSpend)} · Ø štednja ${fmt(k.avgInc-k.avgSpend)} /mes</div>`;
+      + `<div class="muted small" style="margin-top:8px">Ukupno (RSD): Ø potrošnja ${fmt(pSpending/monthsData)} · Ø štednja ${fmt(pNet/monthsData)} /mes</div>`;
   } else if(metric==='spend'){
-    title = 'Potrošnja '+label;
-    const cats = an.categoryBreakdown(month,'expense',rate).filter(c=>!exSet.has(c.name)).slice(0,12);
+    title = 'Potrošnja · '+label;
+    const cats = an.categoryBreakdown(periodObj,'expense',rate).filter(c=>!exSet.has(c.name)).slice(0,12);
     body = `<div class="muted small">Po kategoriji</div>`
       + (cats.map(c=>`<div class="rec-row" data-action="drill" data-cat="${c.id}"><div>${esc(c.icon)} ${esc(c.name)}</div><b>${fmt(c.total)}</b></div>`).join('') || '<div class="muted small">—</div>')
-      + `<div class="muted small" style="margin-top:10px">Po računu</div>` + acctSpendRows(month, rate);
+      + `<div class="muted small" style="margin-top:10px">Po računu</div>` + acctSpendRows(periodObj, rate);
   } else { // save
-    title = 'Štednja '+label;
-    body = `<div class="rec-row"><div>Prihodi (realni)</div><b class="pos">+${fmtN(k.current.realIncome)}</b></div>
-            <div class="rec-row"><div>Rashodi (potrošnja)</div><b class="neg">−${fmtN(k.current.spending)}</b></div>
-            <div class="rec-row" style="border-top:1px solid var(--line)"><div><b>Štednja</b> ${k.savingsRate!=null?`(${k.savingsRate.toFixed(0)}%)`:''}</div><b class="${k.current.net<0?'neg':'pos'}">${fmtN(k.current.net)}</b></div>`;
+    title = 'Štednja · '+label;
+    body = `<div class="rec-row"><div>Prihodi (realni)</div><b class="pos">+${fmtN(pIncome)}</b></div>
+            <div class="rec-row"><div>Rashodi (potrošnja)</div><b class="neg">−${fmtN(pSpending)}</b></div>
+            <div class="rec-row" style="border-top:1px solid var(--line)"><div><b>Štednja</b> ${savingsRate!=null?`(${savingsRate.toFixed(0)}%)`:''}</div><b class="${pNet<0?'neg':'pos'}">${fmtN(pNet)}</b></div>`;
   }
   const m = modal(`<h3>${title}</h3>${body}<div class="form-row" style="margin-top:12px"><button class="ghost" data-close style="flex:1">Zatvori</button></div>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
   m.addEventListener('click', e=>{
     if(e.target.closest('[data-close]')) return;
     const el=e.target.closest('[data-action]'); if(!el) return;
-    if(el.dataset.action==='drill' && el.dataset.cat){ clearFilters(); txFilter.category=+el.dataset.cat; view='tx'; m.remove(); render(); }
-    else if(el.dataset.action==='acct'){ clearFilters(); txFilter.account=+el.dataset.acct; view='tx'; m.remove(); render(); }
+    if(el.dataset.action==='drill' && el.dataset.cat){ clearFilters(); applyDashPeriod(); txFilter.category=+el.dataset.cat; view='tx'; m.remove(); render(); }
+    else if(el.dataset.action==='acct'){ clearFilters(); applyDashPeriod(); txFilter.account=+el.dataset.acct; view='tx'; m.remove(); render(); }
   });
 }
 
