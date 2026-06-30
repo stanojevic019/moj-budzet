@@ -58,6 +58,7 @@ code{background:var(--bg2); padding:2px 7px; border-radius:6px; font-size:.85em}
 .kpis{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px}
 .kpi{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:13px}
 .kpi.good{border-color:#1b5e3a} .kpi.bad{border-color:#5e1b1b}
+.kpi.wide{grid-column:1 / -1}
 .kl{font-size:11px; color:var(--muted); font-weight:600} .kv{font-size:19px; font-weight:800; margin:3px 0}
 .ks{font-size:11px; color:var(--muted)}
 

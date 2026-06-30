@@ -10,7 +10,7 @@ const $ = (s, r=document) => r.querySelector(s);
 const app = $('#app');
 let view = 'dashboard';
 let filterMonth = null;   // 'YYYY-MM' or null = all
-let dashPeriod = { preset:'month', from:null, to:null };  // Pregled stats period
+let dashPeriod = { preset:'6m', from:null, to:null };  // Pregled stats period
 let dashRange = null;     // resolved {from,to,…} of dashPeriod for the current render
 const charts = {};
 let pendingImports = [];   // parsed files awaiting confirmation
@@ -199,10 +199,11 @@ function renderDashboard(s){
   const pSpending = mw.reduce((s,x)=>s+x.spending,0);
   const pNet      = mw.reduce((s,x)=>s+x.net,0);
   const pIncome   = mw.reduce((s,x)=>s+x.realIncome,0);
+  const monthsData = mw.length || 1;
+  const avgSpend  = pSpending / monthsData;   // average monthly spending within the selected period
   const savingsRate = pIncome ? pNet/pIncome*100 : null;
   const prevSpending = prevRange ? an.monthly(rate, prevRange).reduce((s,x)=>s+x.spending,0) : 0;
   const momSpend = prevSpending ? (pSpending-prevSpending)/prevSpending*100 : null;
-  const avgSpendAll = m.reduce((s,x)=>s+x.spending,0) / (m.length||1);  // typical monthly spend (full history, stable baseline)
 
   const allOut = an.categoryBreakdown(periodObj,'expense',rate);
   const exSet = new Set(an.EXCLUDE_SPENDING);
@@ -216,7 +217,8 @@ function renderDashboard(s){
   const flows = allOut.filter(c=>exSet.has(c.name));                   // transfers, cash, FX, loan principal
   const rec = an.recurring(rate);   // subscriptions need multiple months → always full history
   const recMonthly = rec.reduce((s,r)=>s+r.median,0);
-  const nws = an.netWorthSeries(rate);
+  const nwsAll = an.netWorthSeries(rate);
+  const nws = nwsAll.filter(x=> x.month>=range.from && x.month<=range.to);   // clip net-worth line to the period
   const nwTrend = nws.length>1 ? nws[nws.length-1].net - nws[nws.length-2].net : 0;
   const ww = an.needsWants(periodObj, rate);
   const proj = range.single ? an.projection(range.to, rate, todayISO()) : null;
@@ -227,7 +229,7 @@ function renderDashboard(s){
   // period summary handed to the KPI cards + insights
   const P = { label:range.label, spending:pSpending, net:pNet, realIncome:pIncome,
     savingsRate, momSpend, top:topCat };
-  const months = m.map(x=>x.label);
+  const months = mw.map(x=>x.label);   // charts follow the selected period
   const PERIODS = [['month','Mesec'],['3m','3m'],['6m','6m'],['12m','12m'],['ytd','Godina'],['all','Sve'],['custom','Biraj']];
 
   s.innerHTML = `
@@ -242,9 +244,10 @@ function renderDashboard(s){
 
     <div class="kpis">
       ${kpi('Neto vrednost', fmt(nw.totalRSD), `${balances.length} računa →`, '', 'data-action="goto" data-view="accounts"')}
+      ${kpi('Priliv · '+P.label, fmt(P.realIncome), 'prihodi u periodu →', 'good', 'data-action="kpi-income"')}
       ${kpi('Potrošnja · '+P.label, fmt(P.spending), P.momSpend==null?'rasčlani →':`${P.momSpend<=0?'📉':'📈'} ${pct(P.momSpend)} vs pret. period`, P.momSpend>0?'bad':'good', 'data-action="kpi-spend"')}
       ${kpi('Štednja · '+P.label, fmt(P.net), P.savingsRate==null?'rasčlani →':`stopa štednje ${P.savingsRate.toFixed(0)}%`, P.net>=0?'good':'bad', 'data-action="kpi-save"')}
-      ${kpi('Prosečna potrošnja', fmt(avgSpendAll), `${m.length} mes. · po računu →`, '', 'data-action="kpi-avg"')}
+      ${kpi('Prosečna potrošnja · '+P.label, fmt(avgSpend), `${monthsData} mes. · po računu →`, 'wide', 'data-action="kpi-avg"')}
     </div>
 
     ${insights(P, breakdown, recMonthly, proj)}
@@ -315,13 +318,13 @@ function renderDashboard(s){
   // charts
   const C = window.Chart;
   charts.ie = new C($('#cIE'), { type:'bar', data:{ labels:months, datasets:[
-    { label:'Prihodi', data:m.map(x=>x.realIncome), backgroundColor:'#22c55e' },
-    { label:'Rashodi', data:m.map(x=>x.spending), backgroundColor:'#ef4444' },
+    { label:'Prihodi', data:mw.map(x=>x.realIncome), backgroundColor:'#22c55e' },
+    { label:'Rashodi', data:mw.map(x=>x.spending), backgroundColor:'#ef4444' },
   ]}, options: barOpts() });
 
   charts.trend = new C($('#cTrend'), { type:'line', data:{ labels:months, datasets:[
-    { label:'Potrošnja', data:m.map(x=>x.spending), borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,.1)', fill:true, tension:.3 },
-    { label:'Štednja', data:m.map(x=>x.net), borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.1)', fill:true, tension:.3 },
+    { label:'Potrošnja', data:mw.map(x=>x.spending), borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,.1)', fill:true, tension:.3 },
+    { label:'Štednja', data:mw.map(x=>x.net), borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.1)', fill:true, tension:.3 },
   ]}, options: barOpts() });
 
   charts.cat = new C($('#cCat'), { type:'doughnut', data:{ labels:breakdown.map(c=>c.name),
@@ -1079,6 +1082,7 @@ async function onClick(e){
   else if(act==='kpi-spend'){ statsModal('spend'); }
   else if(act==='kpi-save'){ statsModal('save'); }
   else if(act==='kpi-avg'){ statsModal('avg'); }
+  else if(act==='kpi-income'){ clearFilters(); applyDashPeriod(); txFilter.type='income'; view='tx'; render(); }
   else if(act==='del-filtered'){
     const { whereSql, params } = buildTxWhere();
     const n = repo.countWhere(whereSql, params);
