@@ -10,6 +10,8 @@ const $ = (s, r=document) => r.querySelector(s);
 const app = $('#app');
 let view = 'dashboard';
 let filterMonth = null;   // 'YYYY-MM' or null = all
+let dashPeriod = { preset:'month', from:null, to:null };  // Pregled stats period
+let dashRange = null;     // resolved {from,to,…} of dashPeriod for the current render
 const charts = {};
 let pendingImports = [];   // parsed files awaiting confirmation
 let drillCat = null;       // category drill-down (id) or null
@@ -181,16 +183,28 @@ function onBack(){
 // =================================================================== DASHBOARD
 function renderDashboard(s){
   const rate = rates();                  // currency→RSD map
-  const m = an.monthly(rate);            // computed once, reused by kpis below
-  const k = an.kpis(rate, m);
+  const m = an.monthly(rate);            // full history — drives the timeline charts
   const balances = an.accountBalances();
   const nw = an.netWorth(rate);
-  if(!k){
+  if(!m.length){
     s.innerHTML = empty('📥','Još nema podataka','Uvezi PDF izvod ili ručno dodaj transakciju da vidiš analizu.','Idi na uvoz','import');
     return;
   }
-  const months = m.map(x=>x.label);
-  const allOut = an.categoryBreakdown(k.current.month,'expense',rate);
+  // selected period governs every aggregate card; the charts below stay full-history
+  const range = resolveDashPeriod(m);
+  dashRange = range;
+  const periodObj = range.single ? range.from : { from:range.from, to:range.to };
+  const prevRange = previousWindow(range);
+  const mw = an.monthly(rate, { from:range.from, to:range.to });       // windowed months
+  const pSpending = mw.reduce((s,x)=>s+x.spending,0);
+  const pNet      = mw.reduce((s,x)=>s+x.net,0);
+  const pIncome   = mw.reduce((s,x)=>s+x.realIncome,0);
+  const savingsRate = pIncome ? pNet/pIncome*100 : null;
+  const prevSpending = prevRange ? an.monthly(rate, prevRange).reduce((s,x)=>s+x.spending,0) : 0;
+  const momSpend = prevSpending ? (pSpending-prevSpending)/prevSpending*100 : null;
+  const avgSpendAll = m.reduce((s,x)=>s+x.spending,0) / (m.length||1);  // typical monthly spend (full history, stable baseline)
+
+  const allOut = an.categoryBreakdown(periodObj,'expense',rate);
   const exSet = new Set(an.EXCLUDE_SPENDING);
   const cidx = {}; repo.getCategories(true).forEach(c=>cidx[c.id]=c);
   const groupOf = (id)=>{ const c=cidx[id]; return c && c.parent_id!=null ? (cidx[c.parent_id]||c) : c; };
@@ -198,41 +212,55 @@ function renderDashboard(s){
   for(const r of allOut){ if(exSet.has(r.name)) continue; const g=groupOf(r.id); if(!g) continue;
     const e = gAgg[g.id] || (gAgg[g.id]={ id:g.id, name:g.name, icon:g.icon, color:g.color, total:0 }); e.total += r.total; }
   const breakdown = Object.values(gAgg).sort((a,b)=>b.total-a.total).slice(0,8);
+  const topCat = allOut.filter(c=>!exSet.has(c.name))[0] || null;
   const flows = allOut.filter(c=>exSet.has(c.name));                   // transfers, cash, FX, loan principal
-  const rec = an.recurring(rate);
+  const rec = an.recurring(rate);   // subscriptions need multiple months → always full history
   const recMonthly = rec.reduce((s,r)=>s+r.median,0);
-  const runway = k.avgSpend ? nw.totalRSD / k.avgSpend : 0;
   const nws = an.netWorthSeries(rate);
   const nwTrend = nws.length>1 ? nws[nws.length-1].net - nws[nws.length-2].net : 0;
-  const ww = an.needsWants(k.current.month, rate);
-  const proj = an.projection(k.current.month, rate, todayISO());
-  const budgets = an.budgetStatus(k.current.month, rate);
+  const ww = an.needsWants(periodObj, rate);
+  const proj = range.single ? an.projection(range.to, rate, todayISO()) : null;
+  const budgets = an.budgetStatus(periodObj, rate, range.single?1:range.months);
   const overBudget = budgets.filter(b=>b.over);
-  const movers = an.categoryMovers(k.current.month, k.prev?k.prev.month:null, rate)
+  const movers = an.categoryMovers(periodObj, prevRange, rate)
     .filter(x=>Math.abs(x.delta)>500).slice(0,5);
+  // period summary handed to the KPI cards + insights
+  const P = { label:range.label, spending:pSpending, net:pNet, realIncome:pIncome,
+    savingsRate, momSpend, top:topCat };
+  const months = m.map(x=>x.label);
+  const PERIODS = [['month','Mesec'],['3m','3m'],['6m','6m'],['12m','12m'],['ytd','Godina'],['all','Sve'],['custom','Biraj']];
 
   s.innerHTML = `
+    <div class="seg period-seg">
+      ${PERIODS.map(([v,l])=>`<button class="seg-b ${range.preset===v?'active':''}" data-action="dash-period" data-preset="${v}">${l}</button>`).join('')}
+    </div>
+    ${range.preset==='custom'?`<div class="form-row period-custom">
+      <label class="fld">Od<input type="month" id="dpFrom" min="${m[0].month}" max="${m[m.length-1].month}" value="${range.from}"></label>
+      <label class="fld">Do<input type="month" id="dpTo" min="${m[0].month}" max="${m[m.length-1].month}" value="${range.to}"></label>
+    </div>`:''}
+    <div class="muted small period-note">📊 Statistika za: <b>${esc(range.label)}</b>${range.single?'':` · ${range.months} mes.`}</div>
+
     <div class="kpis">
       ${kpi('Neto vrednost', fmt(nw.totalRSD), `${balances.length} računa →`, '', 'data-action="goto" data-view="accounts"')}
-      ${kpi('Potrošnja '+k.current.label, fmt(k.current.spending), k.momSpend==null?'rasčlani →':`${k.momSpend<=0?'📉':'📈'} ${pct(k.momSpend)} vs prošli mesec`, k.momSpend>0?'bad':'good', 'data-action="kpi-spend"')}
-      ${kpi('Štednja '+k.current.label, fmt(k.current.net), k.savingsRate==null?'rasčlani →':`stopa štednje ${k.savingsRate.toFixed(0)}%`, k.current.net>=0?'good':'bad', 'data-action="kpi-save"')}
-      ${kpi('Prosečna potrošnja', fmt(k.avgSpend), `${k.monthsCount} mes. · po računu →`, '', 'data-action="kpi-avg"')}
+      ${kpi('Potrošnja · '+P.label, fmt(P.spending), P.momSpend==null?'rasčlani →':`${P.momSpend<=0?'📉':'📈'} ${pct(P.momSpend)} vs pret. period`, P.momSpend>0?'bad':'good', 'data-action="kpi-spend"')}
+      ${kpi('Štednja · '+P.label, fmt(P.net), P.savingsRate==null?'rasčlani →':`stopa štednje ${P.savingsRate.toFixed(0)}%`, P.net>=0?'good':'bad', 'data-action="kpi-save"')}
+      ${kpi('Prosečna potrošnja', fmt(avgSpendAll), `${m.length} mes. · po računu →`, '', 'data-action="kpi-avg"')}
     </div>
 
-    ${insights(k, breakdown, recMonthly, proj)}
+    ${insights(P, breakdown, recMonthly, proj)}
 
     ${budgets.length ? `<section class="card" data-action="goto" data-view="budgets" style="cursor:pointer">
-      <div class="row-between"><h3>🎯 Budžeti · ${k.current.label}</h3><small>${overBudget.length?`<span class="neg">${overBudget.length} prekoračeno</span>`:'sve u okviru ✓'}</small></div>
+      <div class="row-between"><h3>🎯 Budžeti · ${range.label}</h3><small>${overBudget.length?`<span class="neg">${overBudget.length} prekoračeno</span>`:'sve u okviru ✓'}</small></div>
       ${budgets.slice(0,4).map(b=>budgetBar(b)).join('')}
       <div class="muted small" style="margin-top:6px">Dodirni za sve budžete →</div>
     </section>`:''}
 
     <section class="card">
-      <h3>Pravilo 50/30/20 · ${k.current.label}</h3>
-      ${ratioBar('Potrebe', ww.needs, k.current.realIncome, 50, '#22c55e')}
-      ${ratioBar('Želje', ww.wants, k.current.realIncome, 30, '#f59e0b')}
-      ${ratioBar('Štednja', Math.max(0,k.current.net), k.current.realIncome, 20, '#3b82f6')}
-      <div class="muted small" style="margin-top:6px">Cilj: 50% potrebe · 30% želje · 20% štednja (od prihoda ${fmt(k.current.realIncome)})</div>
+      <h3>Pravilo 50/30/20 · ${range.label}</h3>
+      ${ratioBar('Potrebe', ww.needs, P.realIncome, 50, '#22c55e')}
+      ${ratioBar('Želje', ww.wants, P.realIncome, 30, '#f59e0b')}
+      ${ratioBar('Štednja', Math.max(0,P.net), P.realIncome, 20, '#3b82f6')}
+      <div class="muted small" style="margin-top:6px">Cilj: 50% potrebe · 30% želje · 20% štednja (od prihoda ${fmt(P.realIncome)})</div>
     </section>
 
     <section class="card">
@@ -251,7 +279,7 @@ function renderDashboard(s){
     </section>
 
     <section class="card">
-      <div class="row-between"><h3>Rashodi po grupama · ${k.current.label}</h3></div>
+      <div class="row-between"><h3>Rashodi po grupama · ${range.label}</h3></div>
       <div class="chart-wrap small"><canvas id="cCat"></canvas></div>
       <div class="cat-legend">
         ${breakdown.map(c=>`<div class="cl" data-action="drill-group" data-group="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.icon)} ${esc(c.name)}<b>${fmt(c.total)}</b></div>`).join('')}
@@ -260,13 +288,13 @@ function renderDashboard(s){
     </section>
 
     ${flows.length ? `<section class="card">
-      <div class="row-between"><h3>Ostali tokovi · ${k.current.label}</h3><small>transferi · keš · devize</small></div>
+      <div class="row-between"><h3>Ostali tokovi · ${range.label}</h3><small>transferi · keš · devize</small></div>
       ${flows.map(c=>`<div class="rec-row" data-action="drill" data-cat="${c.id}"><div>${esc(c.icon)} ${esc(c.name)}</div><b>${fmt(c.total)}</b></div>`).join('')}
       <div class="muted small" style="margin-top:6px">Dodirni za detalje (npr. Transfer drugima) →</div>
     </section>`:''}
 
     ${movers.length ? `<section class="card">
-      <h3>Najveće promene vs ${k.prev?k.prev.label:'prošli mesec'}</h3>
+      <h3>Najveće promene vs prethodni period</h3>
       ${movers.map(x=>`<div class="rec-row" data-action="drill" data-cat="${x.cat.id||''}"><div>${esc(x.cat.icon)} ${esc(x.cat.name)}</div>
         <b class="${x.delta>0?'neg':'pos'}">${x.delta>0?'▲':'▼'} ${fmtN(Math.abs(x.delta))}</b></div>`).join('')}
     </section>`:''}
@@ -303,6 +331,40 @@ function renderDashboard(s){
   charts.nw = new C($('#cNW'), { type:'line', data:{ labels:nws.map(x=>x.label), datasets:[
     { label:'Neto vrednost', data:nws.map(x=>x.net), borderColor:accent(), backgroundColor:'rgba(59,130,246,.12)', fill:true, tension:.3 },
   ]}, options: barOpts() });
+
+  $('#dpFrom',s)?.addEventListener('change', e=>{ dashPeriod.from = e.target.value||null; render(); });
+  $('#dpTo',s)?.addEventListener('change', e=>{ dashPeriod.to = e.target.value||null; render(); });
+}
+
+// Resolve the dashboard period selector into concrete month bounds, clamped to data.
+function dashMonthAdd(ym, delta){ let [y,mo]=ym.split('-').map(Number); mo+=delta; y+=Math.floor((mo-1)/12); mo=((mo-1)%12+12)%12+1; return `${y}-${String(mo).padStart(2,'0')}`; }
+function dashMonthDiff(a,b){ const [ay,am]=a.split('-').map(Number),[by,bm]=b.split('-').map(Number); return (by-ay)*12+(bm-am); }
+function resolveDashPeriod(mAll){
+  const all = mAll.map(x=>x.month); const first=all[0], last=all[all.length-1];
+  const p = dashPeriod.preset; let from=first, to=last;
+  if(p==='month'){ from=to=last; }
+  else if(p==='3m'){ from=dashMonthAdd(last,-2); }
+  else if(p==='6m'){ from=dashMonthAdd(last,-5); }
+  else if(p==='12m'){ from=dashMonthAdd(last,-11); }
+  else if(p==='ytd'){ from=last.slice(0,4)+'-01'; }
+  else if(p==='all'){ from=first; to=last; }
+  else if(p==='custom'){ from=dashPeriod.from||first; to=dashPeriod.to||last; if(from>to){ const t=from; from=to; to=t; } }
+  if(from<first) from=first; if(to>last) to=last;
+  const single = from===to;
+  const label = single ? an.fmtMonth(to)
+    : p==='all' ? 'sve vreme'
+    : p==='ytd' ? to.slice(0,4)+'.'
+    : `${an.fmtMonth(from)} – ${an.fmtMonth(to)}`;
+  return { from, to, months: dashMonthDiff(from,to)+1, single, label, preset:p };
+}
+// The equal-length window immediately before the selected one (for % comparisons).
+function previousWindow(range){
+  if(range.preset==='all') return null;
+  return { from: dashMonthAdd(range.from, -range.months), to: dashMonthAdd(range.from, -1) };
+}
+// Apply the active dashboard period as a date filter when drilling into the tx list.
+function applyDashPeriod(){
+  if(dashRange && dashRange.preset!=='all'){ txFilter.from=`${dashRange.from}-01`; txFilter.to=`${dashRange.to}-31`; }
 }
 
 // progress bar for a budget row
@@ -323,22 +385,22 @@ function ratioBar(label, value, income, targetPct, color){
       <div class="bbar-target" style="left:${targetPct}%"></div></div></div>`;
 }
 
-function insights(k, breakdown, recMonthly, proj){
+function insights(P, breakdown, recMonthly, proj){
   const tips = [];
   if(proj && proj.day>=2){
     tips.push(`📅 Tempom od ${fmt(proj.spent)} za ${proj.day}. dana, do kraja meseca projektovano je <b>${fmt(proj.projected)}</b>.`);
   }
-  if(k.savingsRate!=null){
-    if(k.savingsRate>=20) tips.push(`✅ Odlična stopa štednje (<b>${k.savingsRate.toFixed(0)}%</b>) ovog meseca. Ekonomska preporuka je 20%+.`);
-    else if(k.savingsRate>=0) tips.push(`🟡 Štednja ovog meseca je <b>${k.savingsRate.toFixed(0)}%</b>. Cilj 20% — ima prostora.`);
-    else tips.push(`🔴 Ovog meseca trošiš više nego što zarađuješ (štednja <b>${k.savingsRate.toFixed(0)}%</b>).`);
+  if(P.savingsRate!=null){
+    if(P.savingsRate>=20) tips.push(`✅ Odlična stopa štednje (<b>${P.savingsRate.toFixed(0)}%</b>) za period ${P.label}. Ekonomska preporuka je 20%+.`);
+    else if(P.savingsRate>=0) tips.push(`🟡 Štednja u periodu ${P.label} je <b>${P.savingsRate.toFixed(0)}%</b>. Cilj 20% — ima prostora.`);
+    else tips.push(`🔴 U periodu ${P.label} trošiš više nego što zarađuješ (štednja <b>${P.savingsRate.toFixed(0)}%</b>).`);
   }
-  if(k.momSpend!=null){
-    if(k.momSpend>10) tips.push(`📈 Potrošnja je skočila <b>${pct(k.momSpend)}</b> u odnosu na prošli mesec.`);
-    else if(k.momSpend<-10) tips.push(`📉 Bravo — potrošnja je pala <b>${pct(k.momSpend)}</b> vs prošli mesec.`);
+  if(P.momSpend!=null){
+    if(P.momSpend>10) tips.push(`📈 Potrošnja je skočila <b>${pct(P.momSpend)}</b> u odnosu na prethodni period.`);
+    else if(P.momSpend<-10) tips.push(`📉 Bravo — potrošnja je pala <b>${pct(P.momSpend)}</b> vs prethodni period.`);
   }
-  if(k.top){ const share = k.current.spending>0 ? (k.top.total/k.current.spending*100) : 0;
-    tips.push(`🏆 Najveća kategorija (${k.current.label}): <b>${esc(k.top.icon+' '+k.top.name)}</b> — ${fmt(k.top.total)} (${share.toFixed(0)}% potrošnje).`); }
+  if(P.top){ const share = P.spending>0 ? (P.top.total/P.spending*100) : 0;
+    tips.push(`🏆 Najveća kategorija (${P.label}): <b>${esc(P.top.icon+' '+P.top.name)}</b> — ${fmt(P.top.total)} (${share.toFixed(0)}% potrošnje).`); }
   if(recMonthly>0) tips.push(`🔁 Redovni/pretplatni troškovi te koštaju oko <b>${fmt(recMonthly)}</b> mesečno (${fmt(recMonthly*12)} godišnje).`);
   return `<section class="card insights"><h3>💡 Uvidi</h3>${tips.map(t=>`<div class="tip">${t}</div>`).join('')}</section>`;
 }
@@ -1005,8 +1067,9 @@ async function onClick(e){
   else if(act==='add-manual'){ addManualModal(); }
   else if(act==='edit-cat'){ editCatModal(+a.dataset.txid); }
   else if(act==='toggle-hide'){ db.setSetting('hide_amounts', hideAmounts()?'0':'1'); await persist(); applyPrefs(); const btn=$('[data-action="toggle-hide"]'); if(btn) btn.textContent=hideAmounts()?'🙈':'👁️'; }
-  else if(act==='drill'){ if(a.dataset.cat){ clearFilters(); txFilter.category=+a.dataset.cat; view='tx'; render(); } }
-  else if(act==='drill-group'){ if(a.dataset.group){ clearFilters(); txFilter.group=+a.dataset.group; view='tx'; render(); } }
+  else if(act==='drill'){ if(a.dataset.cat){ clearFilters(); applyDashPeriod(); txFilter.category=+a.dataset.cat; view='tx'; render(); } }
+  else if(act==='drill-group'){ if(a.dataset.group){ clearFilters(); applyDashPeriod(); txFilter.group=+a.dataset.group; view='tx'; render(); } }
+  else if(act==='dash-period'){ dashPeriod.preset=a.dataset.preset; if(a.dataset.preset!=='custom'){ dashPeriod.from=null; dashPeriod.to=null; } render(); }
   else if(act==='acct'){ clearFilters(); txFilter.account=+a.dataset.acct; view='tx'; render(); }
   else if(act==='merch'){ clearFilters(); txFilter.q=a.dataset.merch; view='tx'; render(); }
   else if(act==='add-to-acct'){ addManualModal({ accountId:+a.dataset.acct }); }

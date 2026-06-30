@@ -19,6 +19,19 @@ export function convExpr(rates, col='currency'){
 }
 const toRSD = (amount, currency, rates) => amount * ((rates && rates[currency]) || 1);
 
+// Build a date condition for a "period": a 'YYYY-MM' string (single month),
+// a { from, to } range (inclusive, 'YYYY-MM'), or null/undefined (all time).
+// Returns a bare condition (no WHERE/AND) so callers compose it freely.
+function monthCond(period, col='date'){
+  const mm = `substr(${col},1,7)`;
+  if(!period) return { cond:'', params:[] };
+  if(typeof period === 'string') return { cond:`${mm}=?`, params:[period] };
+  const c=[], p=[];
+  if(period.from){ c.push(`${mm}>=?`); p.push(period.from); }
+  if(period.to){   c.push(`${mm}<=?`); p.push(period.to); }
+  return { cond: c.join(' AND '), params: p };
+}
+
 const fmtMonth = (m) => {
   const [y,mm] = m.split('-'); const names=['','jan','feb','mar','apr','maj','jun','jul','avg','sep','okt','nov','dec'];
   return `${names[+mm]} ${y.slice(2)}`;
@@ -30,11 +43,13 @@ function catLookup(){
   return map;
 }
 
-// Monthly income / expense / spending / net, all in RSD base.
-export function monthly(rates){
+// Monthly income / expense / spending / net, all in RSD base. Optional `range`
+// ({from,to} in 'YYYY-MM', or null = all) limits which months are included.
+export function monthly(rates, range){
   const cats = catLookup();
   const exS = new Set(EXCLUDE_SPENDING), exI = new Set(EXCLUDE_INCOME);
-  const rows = db.all(`SELECT substr(date,1,7) AS m, amount, currency, category_id FROM transactions`);
+  const { cond, params } = monthCond(range);
+  const rows = db.all(`SELECT substr(date,1,7) AS m, amount, currency, category_id FROM transactions ${cond?'WHERE '+cond:''}`, params);
   const byM = {};
   for(const r of rows){
     const c = cats[r.category_id]; const nm = c?c.name:'';
@@ -48,15 +63,16 @@ export function monthly(rates){
   return list;
 }
 
-// Category breakdown for a month ('YYYY-MM') or null = all months. kind expense|income. RSD base.
-export function categoryBreakdown(month, kind='expense', rates){
+// Category breakdown for a period: a 'YYYY-MM' month, a {from,to} range, or
+// null = all. kind expense|income. RSD base.
+export function categoryBreakdown(period, kind='expense', rates){
   const cats = catLookup();
   const sign = kind==='income' ? 'amount > 0' : 'amount < 0';
-  const where = month ? `AND substr(date,1,7)=?` : '';
+  const { cond, params } = monthCond(period);
   const rows = db.all(
     `SELECT category_id, SUM(ABS(amount) * ${convExpr(rates)}) AS total, COUNT(*) AS n
-     FROM transactions WHERE ${sign} ${where}
-     GROUP BY category_id`, month ? [month] : []);
+     FROM transactions WHERE ${sign} ${cond?'AND '+cond:''}
+     GROUP BY category_id`, params);
   return rows.map(r => {
     const c = cats[r.category_id] || { name:'?', color:'#888', icon:'' };
     return { id:r.category_id, name:c.name, color:c.color, icon:c.icon, total:r.total, n:r.n, kind:c.kind };
@@ -79,10 +95,11 @@ export function netWorth(rates){
 }
 
 // Recurring charges: same merchant in >= 3 distinct months. Estimated monthly cost (RSD).
-export function recurring(rates){
+export function recurring(rates, range){
+  const { cond, params } = monthCond(range);
   const rows = db.all(
     `SELECT merchant, substr(date,1,7) AS m, ABS(amount) AS amt, currency
-     FROM transactions WHERE amount<0 AND merchant IS NOT NULL AND merchant<>''`);
+     FROM transactions WHERE amount<0 AND merchant IS NOT NULL AND merchant<>'' ${cond?'AND '+cond:''}`, params);
   const byMerch = {};
   for(const r of rows){
     const amt = toRSD(r.amt, r.currency, rates);
@@ -116,24 +133,28 @@ export function kpis(rates, m=null){
 }
 
 // ---------- budgets ----------
-export function budgetStatus(month, rates){
+// `period` may be a month, a {from,to} range, or null. For multi-month periods
+// pass `monthsCount` so the (monthly) budget amount is scaled to the window.
+export function budgetStatus(period, rates, monthsCount=1){
   const budgets = db.all(`SELECT b.category_id, b.amount, c.name, c.icon, c.color
     FROM budgets b JOIN categories c ON c.id=b.category_id WHERE c.archived=0`);
   const spendByCat = {};
-  for(const r of categoryBreakdown(month,'expense',rates)) spendByCat[r.id] = r.total;
+  for(const r of categoryBreakdown(period,'expense',rates)) spendByCat[r.id] = r.total;
   const rows = budgets.map(b=>{
+    const amount = b.amount * (monthsCount||1);
     const spent = spendByCat[b.category_id] || 0;
-    const pct = b.amount ? spent/b.amount*100 : 0;
-    return {...b, spent, pct, remaining:b.amount-spent, over:spent>b.amount};
+    const pct = amount ? spent/amount*100 : 0;
+    return {...b, amount, monthly:b.amount, spent, pct, remaining:amount-spent, over:spent>amount};
   });
   return rows.sort((a,b)=>b.pct-a.pct);
 }
 
 // ---------- 50/30/20 ----------
-export function needsWants(month, rates){
+export function needsWants(period, rates){
+  const { cond, params } = monthCond(period, 't.date');
   const rows = db.all(`SELECT c.grp AS grp, SUM(ABS(t.amount)*${convExpr(rates)}) AS tot
     FROM transactions t JOIN categories c ON c.id=t.category_id
-    WHERE t.amount<0 AND substr(t.date,1,7)=? GROUP BY c.grp`, [month]);
+    WHERE t.amount<0 ${cond?'AND '+cond:''} GROUP BY c.grp`, params);
   let needs=0, wants=0;
   for(const r of rows){ if(r.grp==='needs') needs=r.tot; else if(r.grp==='wants') wants=r.tot; }
   return { needs, wants };
@@ -171,13 +192,14 @@ export function netWorthSeries(rates){
 }
 
 // ---------- biggest category movers ----------
-export function categoryMovers(curMonth, prevMonth, rates){
+export function categoryMovers(curPeriod, prevPeriod, rates){
   const cats = catLookup();
   const conv = convExpr(rates);
-  const q = (mo)=>{ const rows=db.all(`SELECT category_id, SUM(ABS(amount)*${conv}) AS t
-      FROM transactions WHERE amount<0 AND substr(date,1,7)=? GROUP BY category_id`, [mo]);
+  const q = (period)=>{ const { cond, params } = monthCond(period);
+    const rows=db.all(`SELECT category_id, SUM(ABS(amount)*${conv}) AS t
+      FROM transactions WHERE amount<0 ${cond?'AND '+cond:''} GROUP BY category_id`, params);
     const map={}; rows.forEach(r=>map[r.category_id]=r.t); return map; };
-  const cur=q(curMonth), prev=prevMonth?q(prevMonth):{};
+  const cur=q(curPeriod), prev=prevPeriod?q(prevPeriod):{};
   const ids=new Set([...Object.keys(cur), ...Object.keys(prev)]);
   return [...ids].map(id=>({ cat:cats[id]||{name:'?',icon:'',color:'#888'}, cur:cur[id]||0, prev:prev[id]||0, delta:(cur[id]||0)-(prev[id]||0) }))
     .sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
