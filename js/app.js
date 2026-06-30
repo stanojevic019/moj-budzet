@@ -383,9 +383,16 @@ function renderTx(s){
   const { whereSql, params } = buildTxWhere();
   const rows = db.all(`SELECT * FROM transactions ${whereSql} ORDER BY date DESC, id DESC LIMIT 500`, params);
   const conv = an.convExpr(rate);
+  // Internal transfers (incl. the Novčanik ATM mirror) are money moving between the
+  // user's own accounts, not real income/spending — keep them out of the +/− flow
+  // totals and the chart, consistent with the dashboard's realIncome/spending.
+  const idsOf = names => cats.filter(c=>names.includes(c.name)).map(c=>c.id);
+  const exIncIds = idsOf(an.EXCLUDE_INCOME), exSpdIds = idsOf(an.EXCLUDE_SPENDING);
+  const exInc = exIncIds.length ? ` AND category_id NOT IN (${exIncIds.join(',')})` : '';
+  const exSpd = exSpdIds.length ? ` AND category_id NOT IN (${exSpdIds.join(',')})` : '';
   const agg = db.get(`SELECT COUNT(*) AS n,
-     COALESCE(SUM(CASE WHEN amount>0 THEN amount*${conv} ELSE 0 END),0) AS inc,
-     COALESCE(SUM(CASE WHEN amount<0 THEN -amount*${conv} ELSE 0 END),0) AS out
+     COALESCE(SUM(CASE WHEN amount>0${exInc} THEN amount*${conv} ELSE 0 END),0) AS inc,
+     COALESCE(SUM(CASE WHEN amount<0${exSpd} THEN -amount*${conv} ELSE 0 END),0) AS out
      FROM transactions ${whereSql}`, params);
   const sumIn = agg.inc, sumOut = agg.out, totalN = agg.n;
   const drill = (txFilter.group ? catMapById[txFilter.group] : null) || (txFilter.category ? catMapById[txFilter.category] : null);
@@ -439,8 +446,8 @@ function renderTx(s){
   if(rows.length){
     // chart reflects the CURRENT filters (month/account/category/type/amount/search)
     const fm = db.all(`SELECT substr(date,1,7) AS m,
-      SUM(CASE WHEN amount<0 THEN -amount*${conv} ELSE 0 END) AS ex,
-      SUM(CASE WHEN amount>0 THEN amount*${conv} ELSE 0 END) AS inc
+      SUM(CASE WHEN amount<0${exSpd} THEN -amount*${conv} ELSE 0 END) AS ex,
+      SUM(CASE WHEN amount>0${exInc} THEN amount*${conv} ELSE 0 END) AS inc
       FROM transactions ${whereSql} GROUP BY m ORDER BY m`, params);
     charts.flt = new window.Chart($('#cFlt'), { type:'bar', data:{ labels:fm.map(r=>an.fmtMonth(r.m)),
       datasets:[

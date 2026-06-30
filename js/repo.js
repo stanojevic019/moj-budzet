@@ -97,28 +97,27 @@ export function findOrCreateAccountByNumber(number, { bank, currency, name }){
 // Find (or create) the cash "slamarica" account for a given currency, so cash can
 // be held in multiple currencies (each currency = its own cash account, keeping
 // per-currency balances correct).
-export function findOrCreateCashAccount(currency){
+// Find or create a type='cash' account. `byName` keys the lookup on the exact
+// name (used by the wallet, which can coexist with the slamarica in one currency);
+// otherwise one cash account per currency. The type='cash' guard means a bank
+// account that merely happens to share the name is never treated as the target.
+function findOrCreateCash(currency, { name, color='#64748b', byName=false } = {}){
   currency = (currency||'RSD').toUpperCase().replace(/[^A-Z]/g,'').slice(0,3) || 'RSD';
-  const a = db.get(`SELECT * FROM accounts WHERE type='cash' AND currency=? AND archived=0`, [currency]);
+  const finalName = name || (currency==='RSD' ? 'Keš (slamarica)' : `Keš (${currency})`);
+  const a = byName
+    ? db.get(`SELECT * FROM accounts WHERE type='cash' AND name=? AND archived=0`, [finalName])
+    : db.get(`SELECT * FROM accounts WHERE type='cash' AND currency=? AND archived=0`, [currency]);
   if(a) return a;
-  const name = currency==='RSD' ? 'Keš (slamarica)' : `Keš (${currency})`;
-  db.run(`INSERT INTO accounts(name,type,currency,color) VALUES(?,?,?,?)`, [name,'cash',currency,'#64748b']);
+  db.run(`INSERT INTO accounts(name,type,currency,color) VALUES(?,?,?,?)`, [finalName,'cash',currency,color]);
   return db.get(`SELECT * FROM accounts WHERE id=?`, [db.lastId()]);
 }
+export function findOrCreateCashAccount(currency){ return findOrCreateCash(currency); }
 
 // The "Novčanik" wallet (per currency) that receives mirrored ATM withdrawals.
 export function findOrCreateWallet(currency){
   currency = (currency||'RSD').toUpperCase().replace(/[^A-Z]/g,'').slice(0,3) || 'RSD';
   const name = currency==='RSD' ? 'Novčanik' : `Novčanik (${currency})`;
-  const a = db.get(`SELECT * FROM accounts WHERE name=? AND archived=0`, [name]);
-  if(a) return a;
-  db.run(`INSERT INTO accounts(name,type,currency,color) VALUES(?,?,?,?)`, [name,'cash',currency,'#0ea5e9']);
-  return db.get(`SELECT * FROM accounts WHERE id=?`, [db.lastId()]);
-}
-
-function defaultCategoryId(isCredit){
-  const m = catMap();
-  return isCredit ? m['Ostali prilivi'] : m['Ostalo / Nekategorisano'];
+  return findOrCreateCash(currency, { name, color:'#0ea5e9', byName:true });
 }
 
 // Insert one transaction. tx: {account_id,date,amount(signed),currency,description,
@@ -129,12 +128,13 @@ export function insertTransaction(tx, rules, ctx, opts){
     const dup = db.get(`SELECT id FROM transactions WHERE dedupe_key=?`, [tx.dedupe_key]);
     if(dup) return 'skipped';
   }
+  const m = catMap();
   const isCredit = tx.amount >= 0;
   let catId = tx.category_id;
   if(catId == null){
     catId = categorize({ merchant_clean: tx.merchant, description: tx.description, counterparty: tx.counterparty },
                        rules || getRules(), isCredit, ctx);
-    if(catId == null) catId = defaultCategoryId(isCredit);
+    if(catId == null) catId = isCredit ? m['Ostali prilivi'] : m['Ostalo / Nekategorisano'];
   }
   db.run(`INSERT INTO transactions
     (account_id,date,amount,currency,description,counterparty,merchant,category_id,ref,fee,fx,balance,source,note,dedupe_key,import_batch,created_at)
@@ -145,15 +145,18 @@ export function insertTransaction(tx, rules, ctx, opts){
   // ATM withdrawal → mirror the cash into the "Novčanik" wallet as an internal
   // transfer, so cash on hand (and cash spending) can be tracked. Only on import
   // (opts.allowMirror), only for actual cash withdrawals, only with a dedupe key.
-  if(opts && opts.allowMirror && tx.amount < 0 && tx.dedupe_key && catId === catMap()['Podizanje keša']){
-    const wallet = findOrCreateWallet(tx.currency || 'RSD');
+  // The mirror dedupe key is the parent key + '|w', so a single-row delete can
+  // cascade to it (see deleteTransaction) and re-import stays idempotent.
+  if(opts && opts.allowMirror && tx.amount < 0 && tx.dedupe_key && catId === m['Podizanje keša']){
+    const cur = (tx.currency||'RSD');
+    const wallet = findOrCreateWallet(cur);
     const dk = tx.dedupe_key + '|w';
     if(!db.get(`SELECT id FROM transactions WHERE dedupe_key=?`, [dk])){
       db.run(`INSERT INTO transactions
         (account_id,date,amount,currency,description,merchant,category_id,source,dedupe_key,import_batch,created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-        [wallet.id, tx.date, Math.abs(tx.amount), tx.currency||'RSD', 'Podizanje keša → Novčanik',
-         'Novčanik', catMap()['Interni prenos'], 'pdf', dk, opts.importBatch||null, new Date().toISOString()]);
+        [wallet.id, tx.date, Math.abs(tx.amount), cur, 'Podizanje keša → Novčanik',
+         'Novčanik', m['Interni prenos'], 'pdf', dk, opts.importBatch||null, new Date().toISOString()]);
     }
   }
   return 'inserted';
@@ -210,7 +213,12 @@ export function addManual({account_id, date, amount, kind, category_id, descript
   return res;
 }
 
-export function deleteTransaction(id){ db.run(`DELETE FROM transactions WHERE id=?`, [id]); }
+export function deleteTransaction(id){
+  const t = db.get(`SELECT dedupe_key FROM transactions WHERE id=?`, [id]);
+  db.run(`DELETE FROM transactions WHERE id=?`, [id]);
+  // also drop the Novčanik mirror row (dedupe_key + '|w') so cash isn't left orphaned
+  if(t && t.dedupe_key) db.run(`DELETE FROM transactions WHERE dedupe_key=?`, [t.dedupe_key + '|w']);
+}
 // teach: remember this merchant→category so future imports recognize it
 export function learnFromTx(txId, catId){
   const t = db.get(`SELECT merchant, description FROM transactions WHERE id=?`, [txId]);
@@ -223,7 +231,15 @@ export function learnFromTx(txId, catId){
 export const learnedCount = () => db.get(`SELECT COUNT(*) AS c FROM learned`).c;
 // Bulk delete by an arbitrary WHERE (built by the UI from the active filters).
 export function countWhere(whereSql, params){ return db.get(`SELECT COUNT(*) AS c FROM transactions ${whereSql}`, params).c; }
-export function deleteWhere(whereSql, params){ db.run(`DELETE FROM transactions ${whereSql}`, params); }
+export function deleteWhere(whereSql, params){
+  // collect Novčanik mirror keys of the rows about to be deleted, then cascade
+  const mirrorKeys = db.all(`SELECT dedupe_key FROM transactions ${whereSql}`, params)
+    .map(r=>r.dedupe_key).filter(Boolean).map(k=>k+'|w');
+  db.run(`DELETE FROM transactions ${whereSql}`, params);
+  if(mirrorKeys.length){
+    db.run(`DELETE FROM transactions WHERE dedupe_key IN (${mirrorKeys.map(()=>'?').join(',')})`, mirrorKeys);
+  }
+}
 // Import batches: list and delete a whole import.
 export const getImportBatches = () => db.all(`
   SELECT import_batch AS batch, COUNT(*) AS n, MIN(date) AS mn, MAX(date) AS mx
