@@ -229,6 +229,23 @@ export function learnFromTx(txId, catId){
           ON CONFLICT(key) DO UPDATE SET category_id=?, n=n+1`, [k, catId, catId]);
 }
 export const learnedCount = () => db.get(`SELECT COUNT(*) AS c FROM learned`).c;
+// How many "Podizanje keša" debits are NOT mirrored into a Novčanik (i.e. untracked cash)?
+export function unmirroredCashCount(){
+  const podz = catMap()['Podizanje keša']; if(!podz) return 0;
+  return db.get(`SELECT COUNT(*) AS c FROM transactions t WHERE t.category_id=? AND t.amount<0
+    AND NOT EXISTS(SELECT 1 FROM transactions w WHERE w.dedupe_key = t.dedupe_key || '|w')`, [podz]).c;
+}
+// Reclassify those untracked cash withdrawals into a real expense category ("Gotovina (keš)"),
+// so they count as spending (the cash left the accounts and wasn't tracked in a wallet).
+export function cashWithdrawalsToExpense(){
+  const podz = catMap()['Podizanje keša']; if(!podz) return 0;
+  let cash = db.get(`SELECT id FROM categories WHERE name='Gotovina (keš)'`);
+  if(!cash){ db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES('Gotovina (keš)','expense','#64748b','💵',NULL,NULL)`); cash = { id: db.lastId() }; }
+  const rows = db.all(`SELECT id FROM transactions t WHERE t.category_id=? AND t.amount<0
+    AND NOT EXISTS(SELECT 1 FROM transactions w WHERE w.dedupe_key = t.dedupe_key || '|w')`, [podz]);
+  for(const r of rows) db.run(`UPDATE transactions SET category_id=? WHERE id=?`, [cash.id, r.id]);
+  return rows.length;
+}
 // Bulk delete by an arbitrary WHERE (built by the UI from the active filters).
 export function countWhere(whereSql, params){ return db.get(`SELECT COUNT(*) AS c FROM transactions ${whereSql}`, params).c; }
 export function deleteWhere(whereSql, params){
