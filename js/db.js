@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -344,6 +344,13 @@ function migrate(){
     setSetting('recat_pending','1');   // app re-runs categorization on uncategorized once
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','9') ON CONFLICT(key) DO UPDATE SET value='9'`);
     v = 9;
+  }
+  if(v < 10){
+    // Wallet ("Novčanik") cash tracking: mirror future ATM withdrawals into a cash
+    // account. Enabled for the existing vault (the user opted in); new vaults stay off.
+    setSetting('mirror_atm','1');
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','10') ON CONFLICT(key) DO UPDATE SET value='10'`);
+    v = 10;
   }
 }
 

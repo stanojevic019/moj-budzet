@@ -106,6 +106,16 @@ export function findOrCreateCashAccount(currency){
   return db.get(`SELECT * FROM accounts WHERE id=?`, [db.lastId()]);
 }
 
+// The "Novčanik" wallet (per currency) that receives mirrored ATM withdrawals.
+export function findOrCreateWallet(currency){
+  currency = (currency||'RSD').toUpperCase().replace(/[^A-Z]/g,'').slice(0,3) || 'RSD';
+  const name = currency==='RSD' ? 'Novčanik' : `Novčanik (${currency})`;
+  const a = db.get(`SELECT * FROM accounts WHERE name=? AND archived=0`, [name]);
+  if(a) return a;
+  db.run(`INSERT INTO accounts(name,type,currency,color) VALUES(?,?,?,?)`, [name,'cash',currency,'#0ea5e9']);
+  return db.get(`SELECT * FROM accounts WHERE id=?`, [db.lastId()]);
+}
+
 function defaultCategoryId(isCredit){
   const m = catMap();
   return isCredit ? m['Ostali prilivi'] : m['Ostalo / Nekategorisano'];
@@ -114,7 +124,7 @@ function defaultCategoryId(isCredit){
 // Insert one transaction. tx: {account_id,date,amount(signed),currency,description,
 //   counterparty,merchant,ref,fee,fx,balance,source,note,dedupe_key,category_id?}
 // Returns 'inserted' | 'skipped'(duplicate).
-export function insertTransaction(tx, rules, ctx){
+export function insertTransaction(tx, rules, ctx, opts){
   if(tx.dedupe_key){
     const dup = db.get(`SELECT id FROM transactions WHERE dedupe_key=?`, [tx.dedupe_key]);
     if(dup) return 'skipped';
@@ -132,6 +142,20 @@ export function insertTransaction(tx, rules, ctx){
     [tx.account_id, tx.date, tx.amount, tx.currency||'RSD', tx.description||null, tx.counterparty||null,
      tx.merchant||null, catId, tx.ref||null, tx.fee||0, tx.fx?JSON.stringify(tx.fx):null,
      tx.balance??null, tx.source||'manual', tx.note||null, tx.dedupe_key||null, tx.import_batch||null, new Date().toISOString()]);
+  // ATM withdrawal → mirror the cash into the "Novčanik" wallet as an internal
+  // transfer, so cash on hand (and cash spending) can be tracked. Only on import
+  // (opts.allowMirror), only for actual cash withdrawals, only with a dedupe key.
+  if(opts && opts.allowMirror && tx.amount < 0 && tx.dedupe_key && catId === catMap()['Podizanje keša']){
+    const wallet = findOrCreateWallet(tx.currency || 'RSD');
+    const dk = tx.dedupe_key + '|w';
+    if(!db.get(`SELECT id FROM transactions WHERE dedupe_key=?`, [dk])){
+      db.run(`INSERT INTO transactions
+        (account_id,date,amount,currency,description,merchant,category_id,source,dedupe_key,import_batch,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        [wallet.id, tx.date, Math.abs(tx.amount), tx.currency||'RSD', 'Podizanje keša → Novčanik',
+         'Novčanik', catMap()['Interni prenos'], 'pdf', dk, opts.importBatch||null, new Date().toISOString()]);
+    }
+  }
   return 'inserted';
 }
 
@@ -150,6 +174,7 @@ export function importStatement(parsed, fileName, batch, bankLabel){
       : `${bank} ···${last4}`,
   });
   let inserted=0, skipped=0;
+  const mirror = db.getSetting('mirror_atm','0')==='1';
   const dates = parsed.transactions.map(t=>t.bookingDate).sort();
   for(const t of parsed.transactions){
     const merchant = cleanMerchant(t.counterparty, t.description);
@@ -160,7 +185,7 @@ export function importStatement(parsed, fileName, batch, bankLabel){
       account_id: acct.id, date: t.bookingDate, amount: t.signed, currency: t.currency||acct.currency,
       description: t.description, counterparty: t.counterparty, merchant,
       ref: t.ref, fee: t.fee, fx: t.fx, balance: t.balance, source: 'pdf', dedupe_key: dedupe, import_batch: importBatch,
-    }, rules, ctx);
+    }, rules, ctx, { allowMirror: mirror, importBatch });
     if(r==='inserted') inserted++; else skipped++;
   }
   // maintain earliest opening balance for correct running totals
