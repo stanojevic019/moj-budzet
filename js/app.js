@@ -667,6 +667,13 @@ function renderSettings(s){
       <div class="accent-row">${ACCENTS.map(c=>`<button class="accent-dot ${accent()===c?'sel':''}" data-action="set-accent" data-color="${c}" style="background:${c}"></button>`).join('')}</div>
     </section>
     <section class="card">
+      <h3>👛 Keš / Novčanik</h3>
+      <p class="muted small">Podizanja sa bankomata se pri uvozu automatski prebacuju u keš račun „Novčanik" (kao interni prenos), da možeš da pratiš keš na ruci i keš potrošnju.</p>
+      <select id="mirrorToggle">
+        ${[['1','Uključeno'],['0','Isključeno']].map(([v,l])=>`<option value="${v}" ${db.getSetting('mirror_atm','0')===v?'selected':''}>${l}</option>`).join('')}
+      </select>
+    </section>
+    <section class="card">
       <h3>🔒 Sigurnost</h3>
       <div class="muted small">Automatsko zaključavanje pri neaktivnosti</div>
       <select id="autolock">
@@ -687,6 +694,7 @@ function renderSettings(s){
       Moj Budžet · podaci su šifrovani (AES-256-GCM, PBKDF2 ${(600000).toLocaleString('sr-RS')} iteracija) i čuvaju se samo na ovom uređaju. Bez interneta i bez bankarske veze.
     </section>`;
   $('#autolock',s)?.addEventListener('change', async e=>{ db.setSetting('autolock_min', +e.target.value); await persist(); resetAutoLock(); toast('Sačuvano.'); });
+  $('#mirrorToggle',s)?.addEventListener('change', async e=>{ db.setSetting('mirror_atm', e.target.value); await persist(); toast(e.target.value==='1'?'Praćenje keša uključeno.':'Praćenje keša isključeno.'); });
 }
 
 // =================================================================== EXPORT
