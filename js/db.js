@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -419,6 +419,17 @@ function migrate(){
     setSetting('fix_company_transfers','1');
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','11') ON CONFLICT(key) DO UPDATE SET value='11'`);
     v = 11;
+  }
+  if(v < 12){
+    // new categories: pass-through money (neutral), shared costs (net of what the
+    // other person pays back), and vehicle purchase (a one-off, not "shopping")
+    const idOf = (name) => { const r = get(`SELECT id FROM categories WHERE name=?`, [name]); return r ? r.id : null; };
+    for(const [name, kind, color, icon, grp, parent] of SEED_CATEGORIES){
+      if(!['Prolazni novac','Zajednički troškovi','Kupovina vozila'].includes(name) || idOf(name)!=null) continue;
+      db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES(?,?,?,?,?,?)`, [name,kind,color,icon,grp||null, idOf(parent)]);
+    }
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','12') ON CONFLICT(key) DO UPDATE SET value='12'`);
+    v = 12;
   }
 }
 

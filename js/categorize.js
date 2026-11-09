@@ -8,7 +8,7 @@ const CARD_ID = /\bEX[A-Z0-9]{6,}\b/g;
 // These must not be renamed or deleted or the name-keyed logic breaks.
 export const PROTECTED_CATEGORY_NAMES = new Set([
   'Ostalo / Nekategorisano','Ostali prilivi','Podizanje keša','Interni prenos',
-  'Transfer drugima','Menjačnica (devize)','Kredit – glavnica',
+  'Transfer drugima','Menjačnica (devize)','Kredit – glavnica','Prolazni novac',
 ]);
 
 // Sanitize a user-entered category icon: short, no HTML-significant chars.
@@ -48,6 +48,7 @@ export const SEED_CATEGORIES = [
   ['Gorivo','expense','#eab308','⛽','needs','Vozilo i prevoz'],
   ['Servis i delovi','expense','#ca8a04','🔧','needs','Vozilo i prevoz'],
   ['Putarina i parking','expense','#a3a3a3','🅿️','needs','Vozilo i prevoz'],
+  ['Kupovina vozila','expense','#854d0e','🚙',null,'Vozilo i prevoz'],
   // Stanovanje
   ['Računi i režije','expense','#14b8a6','🧾','needs','Stanovanje'],
   ['Telefon i internet','expense','#0ea5e9','📱','needs','Stanovanje'],
@@ -63,6 +64,8 @@ export const SEED_CATEGORIES = [
   ['Pretplate i digitalne usluge','expense','#8b5cf6','📺','wants','Slobodno vreme'],
   // Porodica
   ['Pokloni i donacije','expense','#fb7185','🎁',null,'Porodica'],
+  // costs shared with a partner/roommate: what you pay counts, what they pay back is subtracted
+  ['Zajednički troškovi','transfer','#f472b6','🤝','needs','Porodica'],
   // Obaveze i finansije
   ['Kredit – kamata','expense','#b91c1c','💳','needs','Obaveze i finansije'],
   ['Kredit – glavnica','expense','#7f1d1d','💳',null,'Obaveze i finansije'],
@@ -72,6 +75,8 @@ export const SEED_CATEGORIES = [
   ['Transfer drugima','transfer','#f59e0b','↗️',null,'Gotovina i transferi'],
   ['Interni prenos','transfer','#3b82f6','🔁',null,'Gotovina i transferi'],
   ['Menjačnica (devize)','transfer','#0d9488','💱',null,'Gotovina i transferi'],
+  // money that only passes through you (e.g. rent collected for someone else) — neutral
+  ['Prolazni novac','transfer','#94a3b8','↔️',null,'Gotovina i transferi'],
   // Prihodi
   ['Zarada','income','#16a34a','💼',null,'Prihodi'],
   ['Ostali prilivi','income','#10b981','⬇️',null,'Prihodi'],

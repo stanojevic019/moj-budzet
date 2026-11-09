@@ -255,3 +255,14 @@ details.fold[open]>summary::after{transform:rotate(-135deg); margin-bottom:-2px}
 .hide-amounts .binput:focus,.hide-amounts [data-rate]:focus{filter:none}
 /* hidden-app privacy: blur content so the OS app-switcher thumbnail doesn't show amounts */
 .privacy-blur #app{filter:blur(18px);}
+
+/* "Kuda ide novac" — stacked outflow bar vs income bar */
+.flow-bar{display:flex; height:14px; border-radius:7px; overflow:hidden; background:var(--bg2); margin:2px 0 6px}
+.flow-bar span{display:block; height:100%}
+.flow-bar.in{height:8px; margin-bottom:10px}
+.flow .rec-row .dot{align-self:flex-start; margin-top:6px}
+.flow-v{flex:none !important; text-align:right}
+.flow-v small{display:block}
+.rec-row.sub{padding:6px 0 6px 20px; min-height:36px; font-size:13.5px}
+.rec-row.sub b{font-weight:600}
+.ideas .tip{background:var(--bg2); border-radius:10px; padding:10px 12px; font-size:13.5px; margin-top:8px; line-height:1.45}
