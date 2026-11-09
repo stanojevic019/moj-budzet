@@ -236,7 +236,11 @@ export function deleteTransaction(id){
   const t = db.get(`SELECT dedupe_key FROM transactions WHERE id=?`, [id]);
   db.run(`DELETE FROM transactions WHERE id=?`, [id]);
   // also drop the Novčanik mirror row (dedupe_key + '|w') so cash isn't left orphaned
-  if(t && t.dedupe_key) db.run(`DELETE FROM transactions WHERE dedupe_key=?`, [t.dedupe_key + '|w']);
+  if(t && t.dedupe_key) dropCashSplit(t.dedupe_key);
+}
+// remove the Novčanik mirror (key|w) and the "where did the cash go" parts (key|s1, |s2…)
+function dropCashSplit(key){
+  db.run(`DELETE FROM transactions WHERE dedupe_key=? OR (substr(dedupe_key,1,?)=? AND dedupe_key GLOB '*|s[0-9]*')`, [key + '|w', key.length + 2, key + '|s']);
 }
 // Keep the Novčanik mirror in sync with a transaction's category: present only while
 // it is a "Podizanje keša" debit (and wallet tracking is on), otherwise removed.
@@ -246,7 +250,7 @@ function syncMirror(txId){
   const dk = t.dedupe_key + '|w';
   const isCash = t.amount < 0 && t.category_id === catMap()['Podizanje keša'];
   const has = db.get(`SELECT id FROM transactions WHERE dedupe_key=?`, [dk]);
-  if(!isCash && has) db.run(`DELETE FROM transactions WHERE id=?`, [has.id]);
+  if(!isCash && has) dropCashSplit(t.dedupe_key);
   else if(isCash && !has && db.getSetting('mirror_atm','0')==='1'){
     const wallet = findOrCreateWallet(t.currency||'RSD');
     db.run(`INSERT INTO transactions
@@ -319,16 +323,73 @@ export function unmirroredCashCount(){
   return db.get(`SELECT COUNT(*) AS c FROM transactions t WHERE t.category_id=? AND t.amount<0
     AND NOT EXISTS(SELECT 1 FROM transactions w WHERE w.dedupe_key = t.dedupe_key || '|w')`, [podz]).c;
 }
+// "Gotovina (keš)" = cash spent on something unknown (a real expense)
+function cashCategoryId(){
+  const c = db.get(`SELECT id FROM categories WHERE name='Gotovina (keš)'`);
+  if(c) return c.id;
+  const grp = db.get(`SELECT id FROM categories WHERE name='Ostalo' AND parent_id IS NULL`);
+  db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES('Gotovina (keš)','expense','#64748b','💵',NULL,?)`, [grp ? grp.id : null]);
+  return db.lastId();
+}
+// "Where did the cash go?" queue: recent ATM withdrawals (last `days` of data) that
+// are still untracked cash — not in a Novčanik and not yet split.
+export function cashToSplit(days=60){
+  const podz = catMap()['Podizanje keša']; if(!podz) return [];
+  const last = db.get(`SELECT MAX(date) AS d FROM transactions`).d; if(!last) return [];
+  return db.all(`SELECT t.* FROM transactions t WHERE t.category_id=? AND t.amount<0 AND t.date >= date(?, ?)
+    AND (t.dedupe_key IS NULL OR NOT EXISTS(SELECT 1 FROM transactions w WHERE w.dedupe_key = t.dedupe_key || '|w'))
+    ORDER BY t.date DESC, t.id DESC`, [podz, last, `-${days} days`]);
+}
+// Categories offered as one-tap chips when splitting cash: the user's most used spending categories.
+export function cashSplitChoices(n=8){
+  return db.all(`SELECT c.id, c.name, c.icon, c.color, COUNT(*) AS k FROM transactions t JOIN categories c ON c.id=t.category_id
+    WHERE t.amount<0 AND (c.kind='expense' OR c.name='Zajednički troškovi')
+      AND c.name NOT IN ('Ostalo / Nekategorisano','Gotovina (keš)','Kupovina vozila')
+    GROUP BY c.id ORDER BY k DESC LIMIT ?`, [n]);
+}
+// Split one withdrawal into what it was spent on. The cash moves into the Novčanik
+// (mirror row → no longer "untracked cash") and is spent there: one expense per part,
+// the rest as "Gotovina (keš)". The wallet nets to 0; nothing is counted twice.
+// parts = [{ category_id, amount }] (amounts in the withdrawal's currency).
+export function splitCash(txId, parts){
+  const t = db.get(`SELECT * FROM transactions WHERE id=?`, [txId]);
+  if(!t || t.amount >= 0) throw new Error('not a withdrawal');
+  let key = t.dedupe_key;
+  if(!key){ key = `atm:${t.id}`; db.run(`UPDATE transactions SET dedupe_key=? WHERE id=?`, [key, t.id]); }
+  dropCashSplit(key);
+  const total = Math.abs(t.amount), cur = t.currency || 'RSD';
+  const wallet = findOrCreateWallet(cur), now = new Date().toISOString();
+  const put = (amount, catId, desc, dk) => db.run(`INSERT INTO transactions
+    (account_id,date,amount,currency,description,merchant,category_id,source,dedupe_key,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    [wallet.id, t.date, amount, cur, desc, 'Novčanik', catId, 'manual', dk, now]);
+  put(total, catMap()['Interni prenos'], 'Podizanje keša → Novčanik', key + '|w');
+  let used = 0, i = 0;
+  for(const p of parts || []){
+    const a = Math.min(Math.round(Math.abs(+p.amount || 0) * 100) / 100, total - used);
+    if(!(a > 0) || p.category_id == null) continue;
+    const c = db.get(`SELECT name FROM categories WHERE id=?`, [p.category_id]);
+    put(-a, p.category_id, `Keš: ${c ? c.name : ''}`, `${key}|s${++i}`); used += a;
+  }
+  const rest = Math.round((total - used) * 100) / 100;
+  if(rest > 0) put(-rest, cashCategoryId(), 'Keš: nepoznato', `${key}|s${++i}`);
+  return { known: used, unknown: rest };
+}
+// Pass-through money ("Prolazni novac", e.g. rent collected for someone): was the last
+// amount received forwarded? Returns null when there is nothing recent.
+export function passThroughStatus(todayISO){
+  const pid = catMap()['Prolazni novac']; if(pid == null) return null;
+  const rows = db.all(`SELECT id, date, amount, currency FROM transactions WHERE category_id=? ORDER BY date, id`, [pid]);
+  const lastIn = [...rows].reverse().find(r => r.amount > 0); if(!lastIn) return null;
+  const days = Math.round((Date.parse(todayISO) - Date.parse(lastIn.date)) / 864e5);
+  if(days > 75) return null;
+  const out = rows.filter(r => r.amount < 0 && r.date >= lastIn.date);
+  return { catId: pid, lastIn, out, days, forwarded: out.length > 0 };
+}
 // Reclassify those untracked cash withdrawals into a real expense category ("Gotovina (keš)"),
 // so they count as spending (the cash left the accounts and wasn't tracked in a wallet).
 export function cashWithdrawalsToExpense(){
   const podz = catMap()['Podizanje keša']; if(!podz) return 0;
-  let cash = db.get(`SELECT id FROM categories WHERE name='Gotovina (keš)'`);
-  if(!cash){
-    const grp = db.get(`SELECT id FROM categories WHERE name='Ostalo' AND parent_id IS NULL`);
-    db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES('Gotovina (keš)','expense','#64748b','💵',NULL,?)`, [grp ? grp.id : null]);
-    cash = { id: db.lastId() };
-  }
+  const cash = { id: cashCategoryId() };
   const rows = db.all(`SELECT id FROM transactions t WHERE t.category_id=? AND t.amount<0
     AND NOT EXISTS(SELECT 1 FROM transactions w WHERE w.dedupe_key = t.dedupe_key || '|w')`, [podz]);
   for(const r of rows) db.run(`UPDATE transactions SET category_id=? WHERE id=?`, [cash.id, r.id]);

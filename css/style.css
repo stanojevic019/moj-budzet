@@ -266,3 +266,8 @@ details.fold[open]>summary::after{transform:rotate(-135deg); margin-bottom:-2px}
 .rec-row.sub{padding:6px 0 6px 20px; min-height:36px; font-size:13.5px}
 .rec-row.sub b{font-weight:600}
 .ideas .tip{background:var(--bg2); border-radius:10px; padding:10px 12px; font-size:13.5px; margin-top:8px; line-height:1.45}
+.cs-row{gap:8px}
+.cs-row .cs-amt{width:110px; text-align:right}
+.cs-row .cs-del{min-width:44px; padding:6px}
+.card.pt.late{border-color:var(--bad)}
+.card.pt{cursor:pointer}

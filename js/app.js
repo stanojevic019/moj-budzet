@@ -422,7 +422,11 @@ function renderDashboard(s){
       <div class="muted small">${uncShare>=1?`${uncShare.toFixed(0)}% potrošnje u periodu nije razvrstano, pa grupe i budžeti nisu tačni. `:''}Aplikacija pamti tvoj izbor i sledeći put razvrstava sama.</div>
     </section>` : ''}
 
+    ${cashCard()}
+
     ${flowCard(flow, monthsData, cidx)}
+
+    ${passThroughCard()}
 
     ${insights(P, breakdown, recMonthly, proj)}
 
@@ -527,6 +531,71 @@ function flowCard(f, months, cidx){
     <div class="rec-row"><div><b>${f.left>=0?'Ostalo ti je':'Potrošeno više nego što je ušlo'}</b></div><div class="flow-v"><b class="${f.left>=0?'pos':'neg'}">${f.left>=0?'+':'−'}${fmtN(Math.abs(f.left))}</b>${per(Math.abs(f.left))}</div></div>
     <div class="muted small" style="margin-top:6px">Ne računa se novac koji samo prolazi: između tvojih računa, menjačnica, „Prolazni novac".</div>
   </section>`;
+}
+// Recent untracked ATM withdrawals → "where did it go?" (one tap per part).
+function cashCard(){
+  const q = repo.cashToSplit(); if(!q.length) return '';
+  const sum = q.reduce((s,t)=>s+Math.abs(t.amount),0);
+  return `<section class="card uncat" data-action="cash-split">
+    <div class="row-between"><h3>💵 Na šta je otišao keš?</h3><span class="pill">Razvrstaj</span></div>
+    <div class="muted small">${q.length} ${q.length===1?'podizanje':'podizanja'} sa bankomata (${fmt(sum)}) ne zna se na šta je potrošeno. Par dodira po podizanju — i keš prestaje da bude slepa tačka.</div>
+  </section>`;
+}
+// Pass-through money (e.g. rent collected for someone): was the last receipt forwarded?
+function passThroughCard(){
+  const p = repo.passThroughStatus(todayISO()); if(!p) return '';
+  const inTxt = `${fmt(p.lastIn.amount, p.lastIn.currency)} primljeno ${fmtDay(p.lastIn.date)}`;
+  if(p.forwarded){
+    const o = p.out[p.out.length-1];
+    return `<section class="card pt ok" data-action="drill" data-cat="${p.catId}"><div class="row-between"><h3>↔️ Prolazni novac</h3><span class="pos">prosleđeno ✓</span></div>
+      <div class="muted small">${inTxt} → prosleđeno ${fmt(Math.abs(o.amount), o.currency)} (${fmtDay(o.date)}).</div></section>`;
+  }
+  return `<section class="card pt ${p.days>25?'late':''}" data-action="drill" data-cat="${p.catId}"><div class="row-between"><h3>↔️ Prolazni novac</h3><span class="${p.days>25?'neg':'muted'}">čeka (${p.days} d)</span></div>
+    <div class="muted small">${inTxt} — još se ne vidi da je prosleđeno. Ako jeste, uvezi novi izvod.</div></section>`;
+}
+// Split recent ATM withdrawals into what the cash was spent on.
+function cashSplitModal(){
+  const snap = db.snapshot(); let done = 0;
+  const skipped = new Set();
+  const choices = repo.cashSplitChoices();
+  const m = modal(`<h3>Na šta je otišao keš?</h3><div id="csBody"></div>`);
+  const body = m.querySelector('#csBody');
+  const finish = async () => {
+    m.remove();
+    if(done){ await persist(); render();
+      toast(`Razvrstano ${done} ${done===1?'podizanje':'podizanja'} keša.`, true, { label:'Poništi', fn: async () => {
+        if(db.restoreSnapshot(snap)){ await persist(); render(); toast('Poništeno.'); } } }); }
+  };
+  const show = () => {
+    const tx = repo.cashToSplit().find(t => !skipped.has(t.id));
+    if(!tx) return finish();
+    const total = Math.abs(tx.amount); const parts = [];
+    const draw = () => {
+      const used = parts.reduce((s,p)=>s+(+p.amount||0),0), rest = Math.max(0, total-used);
+      body.innerHTML = `${txSummaryHtml(tx)}
+        <div class="muted small" style="margin:8px 0 4px">Dodirni na šta je otišao (može više):</div>
+        <div class="cat-pick">${choices.map(c=>`<button class="catp" data-c="${c.id}" style="border-left-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('')}</div>
+        ${parts.map((p,i)=>`<div class="rec-row cs-row"><div>${esc(p.label)}</div><input type="number" inputmode="decimal" min="0" step="any" class="cs-amt" data-i="${i}" value="${p.amount}" aria-label="Iznos za ${esc(p.label)}"><button class="ghost cs-del" data-i="${i}" aria-label="Ukloni">✕</button></div>`).join('')}
+        <div class="rec-row"><div>Nepoznato</div><b>${fmt(rest, tx.currency)}</b></div>
+        <div class="form-row"><button class="ghost" data-x="close">Zatvori</button><button data-x="skip">Preskoči</button></div>
+        <div class="form-row"><button data-x="unknown">Sve nepoznato</button><button class="primary" data-x="save" ${parts.length?'':'disabled'}>Sačuvaj</button></div>`;
+      body.querySelectorAll('[data-c]').forEach(b => b.onclick = () => {
+        const c = choices.find(x=>x.id===+b.dataset.c);
+        const r = Math.max(0, total - parts.reduce((s,p)=>s+(+p.amount||0),0));
+        parts.push({ category_id:c.id, label:`${c.icon} ${c.name}`, amount: Math.round(r) }); draw();
+        const inp = body.querySelectorAll('.cs-amt'); const last = inp[inp.length-1]; if(last){ last.focus(); last.select(); }
+      });
+      body.querySelectorAll('.cs-amt').forEach(inp => inp.onchange = () => { parts[+inp.dataset.i].amount = Math.max(0, +inp.value||0); draw(); });
+      body.querySelectorAll('.cs-del').forEach(b => b.onclick = () => { parts.splice(+b.dataset.i,1); draw(); });
+      body.querySelector('[data-x="close"]').onclick = finish;
+      body.querySelector('[data-x="skip"]').onclick = () => { skipped.add(tx.id); show(); };
+      const commit = async (list) => { repo.splitCash(tx.id, list); done++; await persist(); show(); };
+      body.querySelector('[data-x="unknown"]').onclick = () => commit([]);
+      body.querySelector('[data-x="save"]').onclick = () => commit(parts);
+    };
+    draw();
+  };
+  show();
 }
 // "Gde možeš da uštediš": concrete, period-based suggestions.
 function ideasCard(ideas){
@@ -1549,6 +1618,7 @@ async function onClick(e){
     a.innerHTML = HIDE?ICON.eyeOff:ICON.eye; a.setAttribute('aria-pressed', String(HIDE)); a.setAttribute('aria-label', HIDE?'Prikaži iznose':'Sakrij iznose');
     render(); toast(HIDE?'Iznosi su sakriveni.':'Iznosi su vidljivi.'); }
   else if(act==='triage'){ triageModal(); }
+  else if(act==='cash-split'){ cashSplitModal(); }
   else if(act==='budget-suggest'){ await budgetSuggest(); }
   else if(act==='drill'){ if(a.dataset.cat){ clearFilters(); applyDashPeriod(); txFilter.category=+a.dataset.cat; view='tx'; render(); } }
   else if(act==='drill-group'){ if(a.dataset.group){ clearFilters(); applyDashPeriod(); txFilter.group=+a.dataset.group; view='tx'; render(); } }
