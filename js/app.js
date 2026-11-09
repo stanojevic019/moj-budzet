@@ -14,12 +14,12 @@ let dashPeriod = { preset:'6m', from:null, to:null };  // Pregled stats period
 let dashRange = null;     // resolved {from,to,…} of dashPeriod for the current render
 const charts = {};
 let pendingImports = [];   // parsed files awaiting confirmation
-let drillCat = null;       // category drill-down (id) or null
 let budgetMonth = null;    // budgets view month (separate from tx filterMonth)
 let showFilters = false;   // advanced filter panel open
 let lockTimer = null;      // auto-lock timer
 let swReg = null;          // service-worker registration
 let backArmed = false;     // history buffer for Android back button
+let persistentStorage = null; // navigator.storage.persist() result (null = unknown)
 
 const todayISO = () => todayLocal();
 
@@ -69,7 +69,15 @@ function applyPrefs(){
   document.documentElement.style.setProperty('--accent', accent());
 }
 
-async function persist(){ await db.save(); }
+async function persist(){
+  try { await db.save(); }
+  catch(e){ toast('⚠ Greška pri čuvanju podataka na uređaju. Napravi rezervnu kopiju.', false); throw e; }
+}
+// Lock = wait for pending saves, drop the key, full reload (wipes decrypted DOM too).
+async function lockNow(){
+  try { await db.flush(); } catch {}
+  db.lock(); location.reload();
+}
 function toast(msg, ok=true){
   const t = document.createElement('div'); t.className = 'toast '+(ok?'ok':'err'); t.textContent = msg;
   document.body.appendChild(t); setTimeout(()=>t.classList.add('show'),10);
@@ -96,6 +104,7 @@ function renderLock(exists){
       ${exists?'':'<input type="password" id="pp2" placeholder="Ponovi lozinku" autocomplete="new-password" />'}
       <button id="lockBtn" class="primary big">${exists?'Otključaj':'Kreiraj sef'}</button>
       <div class="lock-err" id="lockErr"></div>
+      <button class="ghost" id="lockRestore" style="margin-top:10px">📂 Vrati iz rezervne kopije</button>
       <div class="lock-foot">🔒 Podaci nikad ne napuštaju uređaj · AES-256 · bez interneta</div>
     </div>
    </div>`;
@@ -118,6 +127,7 @@ function renderLock(exists){
     }
   };
   $('#lockBtn').onclick = go;
+  $('#lockRestore').onclick = () => backupImportPick(false);
   app.querySelectorAll('input').forEach(i=> i.addEventListener('keydown', e=>{ if(e.key==='Enter') go(); }));
   $('#pp').focus();
 }
@@ -146,9 +156,17 @@ function enterApp(){
   if(updateReady){ const b=$('#updateBanner'); if(b) b.classList.remove('hidden'); }
   // one-time: after a migration that added rules, re-categorize the "Ostalo" backlog
   if(db.getSetting('recat_pending')==='1'){
-    const n = repo.recategorizeAll(true); db.setSetting('recat_pending','0'); persist();
+    const n = repo.recategorizeAll(true); db.setSetting('recat_pending','0'); persist().catch(()=>{});
     if(n) setTimeout(()=>toast(`Auto-kategorizovano ${n} stavki novim pravilima.`), 700);
   }
+  // one-time: bank transfers to companies (fuel, insurance, shops) were filed as
+  // "Transfer drugima" and so missing from spending — re-categorize them.
+  if(db.getSetting('fix_company_transfers')==='1'){
+    const n = repo.fixCompanyTransfers(); db.setSetting('fix_company_transfers','0'); persist().catch(()=>{});
+    if(n) setTimeout(()=>toast(`${n} plaćanja firmama prebačeno iz „Transfer drugima" u potrošnju.`), 1400);
+  }
+  // ask the browser to keep our data (no eviction on low storage / inactivity)
+  db.requestPersistence().then(ok=>{ persistentStorage = ok; });
   resetAutoLock();
   render();
 }
@@ -177,7 +195,7 @@ function onBack(){
   backArmed = false;                                  // our buffer entry was just consumed
   const m = document.querySelector('.modal-bg');
   if(m){ m.remove(); ensureBackArmed(); return; }     // 1) back closes an open modal
-  if(db.isOpen() && view!=='dashboard'){ drillCat=null; showFilters=false; view='dashboard'; render(); return; } // 2) → home (render re-arms)
+  if(db.isOpen() && view!=='dashboard'){ showFilters=false; view='dashboard'; render(); return; } // 2) → home (render re-arms)
   if(db.isOpen()) toast('Nazad još jednom za izlaz.'); // 3) on home: next back exits the app
 }
 
@@ -203,8 +221,19 @@ function renderDashboard(s){
   const monthsData = mw.length || 1;
   const avgSpend  = pSpending / monthsData;   // average monthly spending within the selected period
   const savingsRate = pIncome ? pNet/pIncome*100 : null;
-  const prevSpending = prevRange ? an.monthly(rate, prevRange).reduce((s,x)=>s+x.spending,0) : 0;
+  // The current calendar month is still in progress: compare it with the SAME number
+  // of days of the previous month, not the whole previous month (else every month
+  // "drops" 50%+ mid-month).
+  const today = todayISO(), curMonth = today.slice(0,7);
+  const partial = range.single && range.to === curMonth;
+  let prevSpending;
+  if(partial){
+    const pm = dashMonthAdd(curMonth, -1), [py,pmo] = pm.split('-').map(Number);
+    const day = Math.min(+today.slice(8,10), new Date(py, pmo, 0).getDate());
+    prevSpending = an.spendingBetween(`${pm}-01`, `${pm}-${String(day).padStart(2,'0')}`, rate);
+  } else prevSpending = prevRange ? an.monthly(rate, prevRange).reduce((s,x)=>s+x.spending,0) : 0;
   const momSpend = prevSpending ? (pSpending-prevSpending)/prevSpending*100 : null;
+  const cmpLabel = partial ? `vs prvih ${+today.slice(8,10)} dana pret. meseca` : 'vs pret. period';
 
   const allOut = an.categoryBreakdown(periodObj,'expense',rate);
   const exSet = new Set(an.EXCLUDE_SPENDING);
@@ -224,8 +253,9 @@ function renderDashboard(s){
   // net worth as of the END of the period, the change (Δ) during it, and the
   // reconciliation: startNW + realIncome − realSpending + otherFlows = endNW
   const endNW = (nwsAll.find(x=>x.month===range.to) || { net: nw.totalRSD }).net;
-  const pcond = range.preset==='all' ? '' : `WHERE substr(date,1,7) BETWEEN '${range.from}' AND '${range.to}'`;
-  const nwDelta = db.get(`SELECT COALESCE(SUM(amount*${an.convExpr(rate)}),0) AS d FROM transactions ${pcond}`).d;
+  const pcond = range.preset==='all' ? '' : `WHERE substr(date,1,7) BETWEEN ? AND ?`;
+  const nwDelta = db.get(`SELECT COALESCE(SUM(amount*${an.convExpr(rate)}),0) AS d FROM transactions ${pcond}`,
+    range.preset==='all' ? [] : [range.from, range.to]).d;
   const startNW = endNW - nwDelta;
   const otherFlows = nwDelta - pNet;   // transfers / cash / FX / loan principal (excluded from spending & income)
   const ww = an.needsWants(periodObj, rate);
@@ -236,7 +266,7 @@ function renderDashboard(s){
     .filter(x=>Math.abs(x.delta)>500).slice(0,5);
   // period summary handed to the KPI cards + insights
   const P = { label:range.label, spending:pSpending, net:pNet, realIncome:pIncome,
-    savingsRate, momSpend, top:topCat };
+    savingsRate, momSpend, cmpLabel, top:topCat };
   const months = mw.map(x=>x.label);   // charts follow the selected period
   const PERIODS = [['month','Mesec'],['3m','3m'],['6m','6m'],['12m','12m'],['ytd','Godina'],['all','Sve'],['custom','Biraj']];
 
@@ -253,7 +283,7 @@ function renderDashboard(s){
     <div class="kpis">
       ${kpi('Neto vrednost'+(range.preset==='all'||range.to===m[m.length-1].month?'':' · '+P.label), fmt(endNW), `${nwDelta>=0?'▲':'▼'} ${fmtN(Math.abs(nwDelta))} u periodu →`, '', 'data-action="goto" data-view="accounts"')}
       ${kpi('Priliv · '+P.label, fmt(P.realIncome), 'prihodi u periodu →', 'good', 'data-action="kpi-income"')}
-      ${kpi('Potrošnja · '+P.label, fmt(P.spending), P.momSpend==null?'rasčlani →':`${P.momSpend<=0?'📉':'📈'} ${pct(P.momSpend)} vs pret. period`, P.momSpend>0?'bad':'good', 'data-action="kpi-spend"')}
+      ${kpi('Potrošnja · '+P.label, fmt(P.spending), P.momSpend==null?'rasčlani →':`${P.momSpend<=0?'📉':'📈'} ${pct(P.momSpend)} ${cmpLabel}`, P.momSpend>0?'bad':'good', 'data-action="kpi-spend"')}
       ${kpi('Štednja · '+P.label, fmt(P.net), P.savingsRate==null?'rasčlani →':`stopa štednje ${P.savingsRate.toFixed(0)}%`, P.net>=0?'good':'bad', 'data-action="kpi-save"')}
       ${kpi('Prosečna potrošnja · '+P.label, fmt(avgSpend), `${monthsData} mes. · po računu →`, 'wide', 'data-action="kpi-avg"')}
     </div>
@@ -417,8 +447,8 @@ function insights(P, breakdown, recMonthly, proj){
     else tips.push(`🔴 U periodu ${P.label} trošiš više nego što zarađuješ (štednja <b>${P.savingsRate.toFixed(0)}%</b>).`);
   }
   if(P.momSpend!=null){
-    if(P.momSpend>10) tips.push(`📈 Potrošnja je skočila <b>${pct(P.momSpend)}</b> u odnosu na prethodni period.`);
-    else if(P.momSpend<-10) tips.push(`📉 Bravo — potrošnja je pala <b>${pct(P.momSpend)}</b> vs prethodni period.`);
+    if(P.momSpend>10) tips.push(`📈 Potrošnja je skočila <b>${pct(P.momSpend)}</b> ${P.cmpLabel}.`);
+    else if(P.momSpend<-10) tips.push(`📉 Bravo — potrošnja je pala <b>${pct(P.momSpend)}</b> ${P.cmpLabel}.`);
   }
   if(P.top){ const share = P.spending>0 ? (P.top.total/P.spending*100) : 0;
     tips.push(`🏆 Najveća kategorija (${P.label}): <b>${esc(P.top.icon+' '+P.top.name)}</b> — ${fmt(P.top.total)} (${share.toFixed(0)}% potrošnje).`); }
@@ -437,7 +467,7 @@ const txFilter = { account:null, category:null, group:null, q:null, from:null, t
 function activeFilterCount(){ let n = filterMonth?1:0;
   for(const k of ['account','category','group','q','from','to','type']) if(txFilter[k]) n++;
   if(+txFilter.min>0) n++; if(+txFilter.max>0) n++; return n; }
-function clearFilters(){ Object.keys(txFilter).forEach(k=>txFilter[k]=null); filterMonth=null; drillCat=null; }
+function clearFilters(){ Object.keys(txFilter).forEach(k=>txFilter[k]=null); filterMonth=null; }
 
 function buildTxWhere(){
   const where=[], params=[];
@@ -618,6 +648,8 @@ function renderPreview(){
     const rec = p.recon && p.recon.ok===true ? '<span class="pos">✓ saldo se slaže</span>'
       : (p.recon && p.recon.ok===false ? '<span class="neg">⚠ saldo se NE slaže — proveri uvoz</span>'
       : '<span class="muted">⚠ saldo nije proveren (nije nađeno početno stanje)</span>');
+    const noOpening = p.parsed.opening == null
+      ? `<div class="muted small" style="margin-top:8px">ℹ️ Ovaj format nema početno stanje računa. Ako je ovo prvi uvoz za račun, posle uvoza unesi početno stanje u <b>Računi → ✎ Izmeni</b>, inače neto vrednost neće biti tačna.</div>` : '';
     return `<section class="card imp"><div class="row-between"><b>✅ ${esc(p.file)}</b>${rec}</div>
       <div class="imp-grid">
         <div><span>Banka</span>${p.bank}</div>
@@ -626,7 +658,7 @@ function renderPreview(){
         <div><span>Period</span>${dates[0]||'?'} – ${dates[dates.length-1]||'?'}</div>
         <div><span>Prihodi</span><b class="pos">+${fmtN(inc)}</b></div>
         <div><span>Rashodi</span><b>−${fmtN(exp)}</b></div>
-      </div>${importOverlap(p.parsed)}</section>`;
+      </div>${importOverlap(p.parsed)}${noOpening}</section>`;
   }).join('');
   if(ok.length) wrap.innerHTML += `<button class="primary big" data-action="confirm-import">Uvezi ${ok.length} izvod(a)</button>`;
 }
@@ -705,7 +737,20 @@ function renderSettings(s){
   const batches = repo.getImportBatches();
   const al = autolockMin();
   const cashN = repo.unmirroredCashCount();
+  const lastBk = db.getSetting('last_backup', '');
+  const bkDays = lastBk ? Math.floor((Date.now()-Date.parse(lastBk))/86400000) : null;
   s.innerHTML = `
+    <section class="card">
+      <h3>💾 Rezervna kopija</h3>
+      <p class="muted small">Podaci postoje samo na ovom uređaju. Ako se browser/telefon obriše ili promeni, bez kopije su izgubljeni.
+        Kopija je <b>šifrovana tvojom lozinkom</b> — sačuvaj je npr. u Drive/iCloud; bez lozinke je neupotrebljiva.</p>
+      <div class="muted small">Poslednja kopija: <b class="${bkDays==null||bkDays>30?'neg':''}">${bkDays==null?'nikad':bkDays===0?'danas':`pre ${bkDays} dana`}</b>
+        ${persistentStorage===false?' · ⚠ browser nije odobrio trajno čuvanje — kopija je još važnija':''}</div>
+      <div class="form-row" style="margin-top:8px">
+        <button class="primary" data-action="backup-export">💾 Sačuvaj kopiju</button>
+        <button class="ghost" data-action="backup-import">📂 Vrati iz kopije</button>
+      </div>
+    </section>
     <section class="card">
       <h3>📥 Uvoz izvoda</h3>
       <p class="muted small">Uvezi PDF izvode (Banca Intesa). Duplikati se preskaču.</p>
@@ -779,7 +824,8 @@ function renderSettings(s){
         ${[['0','Isključeno'],['1','1 minut'],['5','5 minuta'],['15','15 minuta'],['30','30 minuta']].map(([v,l])=>`<option value="${v}" ${al==+v?'selected':''}>${l}</option>`).join('')}
       </select>
       <div class="muted small" style="margin-top:10px">Promena lozinke</div>
-      <input type="password" id="np1" placeholder="Nova lozinka" />
+      <input type="password" id="np0" placeholder="Trenutna lozinka" autocomplete="current-password" />
+      <input type="password" id="np1" placeholder="Nova lozinka" autocomplete="new-password" />
       <input type="password" id="np2" placeholder="Ponovi novu lozinku" />
       <button data-action="change-pass">Promeni lozinku</button>
       <button class="ghost" data-action="lock">🔒 Zaključaj sada</button>
@@ -798,13 +844,14 @@ function renderSettings(s){
 
 // =================================================================== EXPORT
 function exportRows(period){
-  const cond = (period && period.from && period.to) ? `WHERE substr(t.date,1,7) BETWEEN '${period.from}' AND '${period.to}'` : '';
+  const has = !!(period && period.from && period.to);
+  const cond = has ? `WHERE substr(t.date,1,7) BETWEEN ? AND ?` : '';
   return db.all(`SELECT t.date AS Datum, a.name AS Racun, t.currency AS Valuta,
     CASE WHEN t.amount>0 THEN t.amount ELSE NULL END AS Priliv,
     CASE WHEN t.amount<0 THEN -t.amount ELSE NULL END AS Rashod,
     c.name AS Kategorija, t.merchant AS Trgovac, t.description AS Opis, t.balance AS Stanje, t.source AS Izvor
     FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id LEFT JOIN categories c ON c.id=t.category_id
-    ${cond} ORDER BY t.date, t.id`);
+    ${cond} ORDER BY t.date, t.id`, has ? [period.from, period.to] : []);
 }
 // scope chosen in the Settings export card: null = all, else the active dashboard period
 function exportPeriod(){
@@ -892,11 +939,16 @@ function addManualModal(opts={}){
   m.querySelector('#mSave').onclick = async ()=>{
     const amount = parseFloat(m.querySelector('#mAmt').value);
     if(!(amount>0)){ m.querySelector('#mAmt').focus(); return; }
+    const date = m.querySelector('#mDate').value;
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > todayLocal()){ toast('Unesi ispravan datum (ne u budućnosti).', false); m.querySelector('#mDate').focus(); return; }
+    if(!accSel.value){ toast('Prvo dodaj račun.', false); return; }
     let accId = +accSel.value;
     const acc = accounts.find(a=>a.id===accId);
     if(acc && acc.type==='cash' && curSel.value!==acc.currency) accId = repo.findOrCreateCashAccount(curSel.value).id;
-    repo.addManual({ account_id:accId, date:m.querySelector('#mDate').value,
-      amount, kind, category_id:+m.querySelector('#mCat').value, description:m.querySelector('#mDesc').value });
+    try {
+      repo.addManual({ account_id:accId, date, amount, kind,
+        category_id:+m.querySelector('#mCat').value || null, description:m.querySelector('#mDesc').value });
+    } catch { toast('Transakcija nije sačuvana — proveri unos.', false); return; }
     await persist(); m.remove(); toast('Transakcija dodata.'); render();
   };
   m.querySelector('#mAmt').focus();
@@ -981,42 +1033,51 @@ function accountEditModal(id){
       <label class="fld">Valuta<select id="aeCur" ${n>0?'disabled':''}>${CURRENCIES.map(c=>`<option ${a.currency===c?'selected':''}>${c}</option>`).join('')}</select></label>
     </div>
     ${n>0?`<div class="muted small">Valuta se ne može menjati jer račun ima ${n} transakcija.</div>`:''}
+    <label class="fld">Početno stanje (${esc(a.currency)})<input id="aeOpen" type="number" step="0.01" inputmode="decimal" value="${a.opening_balance??0}"></label>
+    <div class="muted small">Stanje pre prve transakcije na ovom računu. Ispravi ga ako saldo ne odgovara banci (npr. posle uvoza „Račun transakcije", koji nema početno stanje).</div>
     <div class="form-row" style="margin-top:10px"><button class="ghost" data-close>Otkaži</button><button class="primary" id="aeSave">Sačuvaj</button></div>
     <button class="del-tx" id="aeDel" style="width:100%;margin-top:8px">🗑 Obriši račun${n>0?` (+ ${n} transakcija)`:''}</button>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
   m.querySelector('#aeSave').onclick=async()=>{ const name=m.querySelector('#aeName').value.trim(); if(!name) return;
     const fields={ name, type:m.querySelector('#aeType').value };
     if(n===0) fields.currency=m.querySelector('#aeCur').value;
+    const ob = parseFloat(m.querySelector('#aeOpen').value);
+    if(Number.isFinite(ob)) fields.opening_balance = ob;
     repo.updateAccount(id, fields); await persist(); m.remove(); toast('Račun sačuvan.'); render(); };
   m.querySelector('#aeDel').onclick=async()=>{ if(await confirmModal(`Obrisati račun „${a.name}"${n>0?` i njegovih ${n} transakcija`:''}? Ovo se ne može poništiti.`)){
     repo.deleteAccount(id); await persist(); m.remove(); toast('Račun obrisan.'); render(); } };
 }
 
+// SQL condition (+params) on t.date for a period: 'YYYY-MM', {from,to} or null.
+function periodSql(period){
+  if(period==null) return { cond:'', params:[] };
+  if(typeof period==='string') return { cond:` AND substr(t.date,1,7)=?`, params:[period] };
+  const c=[], p=[];
+  if(period.from){ c.push(` AND substr(t.date,1,7)>=?`); p.push(period.from); }
+  if(period.to){ c.push(` AND substr(t.date,1,7)<=?`); p.push(period.to); }
+  return { cond:c.join(''), params:p };
+}
 // Per-account "real spending" for a period (RSD base, excludes transfers/cash/FX/principal).
 function acctSpendRows(period, rate){
   const conv = an.convExpr(rate, 't.currency');   // accounts also has `currency` → qualify
-  const excl = an.EXCLUDE_SPENDING.map(n=>`'${n}'`).join(',');
-  const cond = period==null ? '' : (typeof period==='string'
-    ? `AND substr(t.date,1,7)='${period}'`
-    : `${period.from?` AND substr(t.date,1,7)>='${period.from}'`:''}${period.to?` AND substr(t.date,1,7)<='${period.to}'`:''}`);
+  const ex = an.EXCLUDE_SPENDING;
+  const { cond, params } = periodSql(period);
   const rows = db.all(`SELECT a.id,a.name, COALESCE(SUM(ABS(t.amount)*${conv}),0) AS tot
     FROM accounts a JOIN transactions t ON t.account_id=a.id JOIN categories c ON c.id=t.category_id
-    WHERE a.archived=0 AND t.amount<0 ${cond} AND c.name NOT IN (${excl})
-    GROUP BY a.id HAVING tot>0 ORDER BY tot DESC`);
+    WHERE a.archived=0 AND t.amount<0 ${cond} AND c.name NOT IN (${ex.map(()=>'?').join(',')})
+    GROUP BY a.id HAVING tot>0 ORDER BY tot DESC`, [...params, ...ex]);
   return rows.map(r=>`<div class="rec-row" data-action="acct" data-acct="${r.id}"><div>${esc(r.name)}</div><b>${fmt(r.tot)}</b></div>`).join('')
     || '<div class="muted small">—</div>';
 }
 // Per-account "real income" for a period (RSD base, excludes transfers/FX).
 function acctIncomeRows(period, rate){
   const conv = an.convExpr(rate, 't.currency');
-  const excl = an.EXCLUDE_INCOME.map(n=>`'${n}'`).join(',');
-  const cond = period==null ? '' : (typeof period==='string'
-    ? `AND substr(t.date,1,7)='${period}'`
-    : `${period.from?` AND substr(t.date,1,7)>='${period.from}'`:''}${period.to?` AND substr(t.date,1,7)<='${period.to}'`:''}`);
+  const ex = an.EXCLUDE_INCOME;
+  const { cond, params } = periodSql(period);
   const rows = db.all(`SELECT a.id,a.name, COALESCE(SUM(t.amount*${conv}),0) AS tot
     FROM accounts a JOIN transactions t ON t.account_id=a.id JOIN categories c ON c.id=t.category_id
-    WHERE a.archived=0 AND t.amount>0 ${cond} AND c.name NOT IN (${excl})
-    GROUP BY a.id HAVING tot>0 ORDER BY tot DESC`);
+    WHERE a.archived=0 AND t.amount>0 ${cond} AND c.name NOT IN (${ex.map(()=>'?').join(',')})
+    GROUP BY a.id HAVING tot>0 ORDER BY tot DESC`, [...params, ...ex]);
   return rows.map(r=>`<div class="rec-row" data-action="acct" data-acct="${r.id}"><div>${esc(r.name)}</div><b class="pos">+${fmt(r.tot)}</b></div>`).join('')
     || '<div class="muted small">—</div>';
 }
@@ -1072,6 +1133,46 @@ function statsModal(metric){
   });
 }
 
+// ---------- encrypted backup ----------
+function downloadBlob(blob, name){
+  const url = URL.createObjectURL(blob); const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+async function backupExport(){
+  try {
+    const text = await db.exportBackup();
+    const name = `moj-budzet-kopija-${todayLocal()}.mbbackup`;
+    const file = new File([text], name, { type:'application/octet-stream' });
+    // phones: share sheet (save to Files/Drive); desktop: plain download
+    if(navigator.canShare && navigator.canShare({ files:[file] }) && /Android|iPhone|iPad/i.test(navigator.userAgent)){
+      try { await navigator.share({ files:[file], title:'Moj Budžet — rezervna kopija' }); }
+      catch(e){ if(e && e.name==='AbortError') return; downloadBlob(file, name); }
+    } else downloadBlob(file, name);
+    db.setSetting('last_backup', new Date().toISOString()); await persist();
+    toast('Rezervna kopija sačuvana (šifrovana).');
+    if(view==='settings') render();
+  } catch { toast('Pravljenje kopije nije uspelo.', false); }
+}
+// Pick a .mbbackup file and replace the vault on this device with it.
+function backupImportPick(fromApp){
+  const inp = document.createElement('input'); inp.type='file'; inp.accept='.mbbackup,application/json,application/octet-stream';
+  inp.onchange = async ()=>{
+    const f = inp.files && inp.files[0]; if(!f) return;
+    const msg = (fromApp || await db.vaultExists())
+      ? 'Vraćanje kopije ZAMENJUJE sve trenutne podatke na ovom uređaju podacima iz kopije. Nastaviti?'
+      : 'Vratiti podatke iz kopije?';
+    if(!await confirmModal(msg, 'Vrati kopiju')) return;
+    try {
+      await db.flush();
+      await db.importBackup(await f.text());
+      toast('Kopija vraćena. Otključaj je lozinkom koja je važila kad je kopija napravljena.');
+      setTimeout(()=>location.reload(), 1200);
+    } catch(e){ toast(e && e.message==='format' ? 'Fajl nije ispravna Moj Budžet kopija.' : 'Vraćanje nije uspelo.', false); }
+  };
+  inp.click();
+}
+
 function wipeAllModal(){
   const m = modal(`<h3>⚠️ Obriši sve podatke</h3>
     <div class="muted small">Ovo trajno briše ceo sef sa ovog uređaja: sve transakcije, račune, budžete, kategorije i podešavanja. <b>Ne može se poništiti.</b></div>
@@ -1083,6 +1184,7 @@ function wipeAllModal(){
     // accept OBRIŠI / OBRISI / DELETE (tolerate missing diacritic on phone keyboards)
     const v = m.querySelector('#wipeC').value.trim().toUpperCase().replace(/Š/g,'S');
     if(v!=='OBRISI' && v!=='DELETE'){ toast('Upiši OBRIŠI (ili OBRISI) za potvrdu.',false); return; }
+    try { await db.flush(); } catch {}
     await db.wipeVault(); location.reload();
   };
   m.querySelector('#wipeC').focus();
@@ -1095,8 +1197,26 @@ function resetAutoLock(){
   const min = autolockMin();
   // Full reload (not partial re-render) so any open modal/toast showing decrypted
   // data is wiped along with the in-memory key — same as manual lock.
-  if(min>0) lockTimer = setTimeout(()=>{ lockTimer=null; db.lock(); location.reload(); }, min*60000);
+  lastActivity = Date.now();
+  if(min>0) lockTimer = setTimeout(()=>{ lockTimer=null; lockNow(); }, min*60000);
 }
+// Background: timers are throttled/frozen while the app is hidden, so measure the
+// time away on return. Away ≥ 1 min (or past the inactivity limit) → lock. While
+// hidden, the content is blurred so the OS app-switcher thumbnail doesn't show it.
+let lastActivity = Date.now(), hiddenAt = null;
+const BACKGROUND_LOCK_MS = 60000;
+document.addEventListener('visibilitychange', ()=>{
+  if(!db.isOpen()) return;
+  if(document.hidden){
+    hiddenAt = Date.now();
+    if(autolockMin()>0) document.body.classList.add('privacy-blur');
+    return;
+  }
+  const min = autolockMin();
+  const away = hiddenAt ? Date.now()-hiddenAt : 0; hiddenAt = null;
+  if(min>0 && (away >= BACKGROUND_LOCK_MS || Date.now()-lastActivity >= min*60000)){ lockNow(); return; }
+  document.body.classList.remove('privacy-blur');
+});
 
 // ---------- service-worker auto-update ----------
 let hadController = false, userTriggeredUpdate = false, updateReady = false;
@@ -1129,13 +1249,12 @@ function doUpdate(){ userTriggeredUpdate=true; if(swReg && swReg.waiting) swReg.
 // =================================================================== EVENTS
 async function onClick(e){
   resetAutoLock();
-  const tabBtn = e.target.closest('.tab'); if(tabBtn){ if(view!==tabBtn.dataset.tab){ drillCat=null; } view=tabBtn.dataset.tab; render(); return; }
+  const tabBtn = e.target.closest('.tab'); if(tabBtn){ view=tabBtn.dataset.tab; render(); return; }
   const a = e.target.closest('[data-action]'); if(!a) return;
   const act = a.dataset.action;
-  if(act==='lock'){ db.lock(); location.reload(); }
+  if(act==='lock'){ lockNow(); }
   else if(act==='goto'){ view=a.dataset.view; render(); }
   else if(act==='fab'){ fabSheet(); }
-  else if(act==='add-manual'){ addManualModal(); }
   else if(act==='edit-cat'){ editCatModal(+a.dataset.txid); }
   else if(act==='toggle-hide'){ db.setSetting('hide_amounts', hideAmounts()?'0':'1'); await persist(); applyPrefs(); const btn=$('[data-action="toggle-hide"]'); if(btn) btn.textContent=hideAmounts()?'🙈':'👁️'; }
   else if(act==='drill'){ if(a.dataset.cat){ clearFilters(); applyDashPeriod(); txFilter.category=+a.dataset.cat; view='tx'; render(); } }
@@ -1146,7 +1265,6 @@ async function onClick(e){
   else if(act==='add-to-acct'){ addManualModal({ accountId:+a.dataset.acct }); }
   else if(act==='edit-account'){ accountEditModal(+a.dataset.id); }
   else if(act==='wipe-all'){ wipeAllModal(); }
-  else if(act==='spend-month'){ clearFilters(); filterMonth=a.dataset.month; txFilter.type='expense'; view='tx'; render(); }
   else if(act==='kpi-spend'){ statsModal('spend'); }
   else if(act==='kpi-save'){ statsModal('save'); }
   else if(act==='kpi-avg'){ statsModal('avg'); }
@@ -1194,11 +1312,21 @@ async function onClick(e){
   else if(act==='export-xlsx'){ exportXlsx(exportPeriod()); }
   else if(act==='export-csv'){ exportCsv(exportPeriod()); }
   else if(act==='change-pass'){
-    const p1=$('#np1').value, p2=$('#np2').value;
+    const p0=$('#np0').value, p1=$('#np1').value, p2=$('#np2').value;
+    if(!p0){ toast('Unesi trenutnu lozinku.',false); return; }
     if(p1.length<6){ toast('Lozinka mora imati bar 6 znakova.',false); return; }
     if(p1!==p2){ toast('Lozinke se ne poklapaju.',false); return; }
-    await db.changePassphrase(p1); toast('Lozinka promenjena.');
+    a.disabled = true;
+    try {
+      if(!await db.verifyPassphrase(p0)){ toast('Trenutna lozinka nije tačna.',false); return; }
+      await db.flush(); await db.changePassphrase(p1);
+      ['#np0','#np1','#np2'].forEach(id=>{ const el=$(id); if(el) el.value=''; });
+      toast('Lozinka promenjena. Stare rezervne kopije i dalje traže staru lozinku.');
+    } catch { toast('Promena lozinke nije uspela.', false); }
+    finally { a.disabled = false; }
   }
+  else if(act==='backup-export'){ await backupExport(); }
+  else if(act==='backup-import'){ backupImportPick(true); }
 }
 
 // empty-state helper

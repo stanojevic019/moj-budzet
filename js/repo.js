@@ -2,7 +2,7 @@
 // (with auto-categorization + dedupe), statement import, and manual entry.
 
 import * as db from './db.js';
-import { cleanMerchant, categorize, sanitizeIcon, PROTECTED_CATEGORY_NAMES, merchantKey, trainModel } from './categorize.js';
+import { cleanMerchant, categorize, sanitizeIcon, PROTECTED_CATEGORY_NAMES, merchantKey, trainModel, isCompany } from './categorize.js';
 
 // Build the learning context: merchant memory + a Naive Bayes model trained on the
 // user's already-categorized transactions. Cheap enough to build per import/recat.
@@ -16,7 +16,7 @@ export function buildCtx(){
     `SELECT merchant, description, category_id FROM transactions
      WHERE category_id IS NOT NULL AND category_id NOT IN (?,?)`, [defE, defI])
     .map(r => ({ text: `${r.merchant||''} ${r.description||''}`, category_id: r.category_id, kind: kind[r.category_id] }));
-  return { learned, model: trainModel(samples) };
+  return { learned, kind, model: trainModel(samples) };
 }
 
 export const isProtectedCategory = (id) => {
@@ -28,7 +28,7 @@ export const getAccounts = (incl=false) =>
   db.all(`SELECT * FROM accounts ${incl?'':'WHERE archived=0'} ORDER BY type, name`);
 export const getCategories = (inclArchived=false) =>
   db.all(`SELECT * FROM categories ${inclArchived?'':'WHERE archived=0'} ORDER BY kind, name`);
-export const getRules = () => db.all(`SELECT r.*, c.kind FROM rules r JOIN categories c ON c.id=r.category_id`);
+export const getRules = () => db.all(`SELECT r.*, c.kind, c.name AS cat_name FROM rules r JOIN categories c ON c.id=r.category_id`);
 
 // ---------- budgets ----------
 export function setBudget(category_id, amount){
@@ -179,11 +179,17 @@ export function importStatement(parsed, fileName, batch, bankLabel){
   let inserted=0, skipped=0;
   const mirror = db.getSetting('mirror_atm','0')==='1';
   const dates = parsed.transactions.map(t=>t.bookingDate).sort();
+  const seen = {};
   for(const t of parsed.transactions){
     const merchant = cleanMerchant(t.counterparty, t.description);
     // include running balance: it is unique per row, so two same-day same-amount
     // transactions with no reference number no longer collide and get dropped.
-    const dedupe = `${parsed.account||acct.id}|${t.ref||''}|${t.bookingDate}|${t.signed}|${t.balance??''}`;
+    // Formats without a running balance/ref (e.g. "Račun transakcije") give two
+    // identical same-day purchases the same key — number repeats within the file so
+    // the 2nd coffee isn't silently dropped. The 1st keeps the original key.
+    const base = `${parsed.account||acct.id}|${t.ref||''}|${t.bookingDate}|${t.signed}|${t.balance??''}`;
+    seen[base] = (seen[base]||0) + 1;
+    const dedupe = seen[base] > 1 ? `${base}#${seen[base]}` : base;
     const r = insertTransaction({
       account_id: acct.id, date: t.bookingDate, amount: t.signed, currency: t.currency||acct.currency,
       description: t.description, counterparty: t.counterparty, merchant,
@@ -205,6 +211,13 @@ export function importStatement(parsed, fileName, batch, bankLabel){
 export function addManual({account_id, date, amount, kind, category_id, description, note}){
   const signed = kind==='income' ? Math.abs(amount) : -Math.abs(amount);
   const acct = db.get(`SELECT * FROM accounts WHERE id=?`, [account_id]);
+  if(!acct || !/^\d{4}-\d{2}-\d{2}$/.test(date||'')) throw new Error('invalid');
+  // The account's opening balance was stated as of opening_date, so it already
+  // reflects anything that happened before it. Shift it so the current balance
+  // (opening + Σ amounts) is unchanged by a back-dated entry.
+  if(acct.opening_date && date < acct.opening_date){
+    db.run(`UPDATE accounts SET opening_balance=opening_balance-? WHERE id=?`, [signed, account_id]);
+  }
   const res = insertTransaction({
     account_id, date, amount: signed, currency: acct?.currency||'RSD',
     description, merchant: description, category_id, source:'manual', note,
@@ -218,6 +231,24 @@ export function deleteTransaction(id){
   db.run(`DELETE FROM transactions WHERE id=?`, [id]);
   // also drop the Novčanik mirror row (dedupe_key + '|w') so cash isn't left orphaned
   if(t && t.dedupe_key) db.run(`DELETE FROM transactions WHERE dedupe_key=?`, [t.dedupe_key + '|w']);
+}
+// Keep the Novčanik mirror in sync with a transaction's category: present only while
+// it is a "Podizanje keša" debit (and wallet tracking is on), otherwise removed.
+function syncMirror(txId){
+  const t = db.get(`SELECT * FROM transactions WHERE id=?`, [txId]);
+  if(!t || !t.dedupe_key || t.dedupe_key.endsWith('|w')) return;
+  const dk = t.dedupe_key + '|w';
+  const isCash = t.amount < 0 && t.category_id === catMap()['Podizanje keša'];
+  const has = db.get(`SELECT id FROM transactions WHERE dedupe_key=?`, [dk]);
+  if(!isCash && has) db.run(`DELETE FROM transactions WHERE id=?`, [has.id]);
+  else if(isCash && !has && db.getSetting('mirror_atm','0')==='1'){
+    const wallet = findOrCreateWallet(t.currency||'RSD');
+    db.run(`INSERT INTO transactions
+      (account_id,date,amount,currency,description,merchant,category_id,source,dedupe_key,import_batch,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [wallet.id, t.date, Math.abs(t.amount), t.currency||'RSD', 'Podizanje keša → Novčanik',
+       'Novčanik', catMap()['Interni prenos'], 'pdf', dk, t.import_batch||null, new Date().toISOString()]);
+  }
 }
 // teach: remember this merchant→category so future imports recognize it
 export function learnFromTx(txId, catId){
@@ -264,6 +295,7 @@ export const getImportBatches = () => db.all(`
 export function deleteByBatch(batch){ db.run(`DELETE FROM transactions WHERE import_batch=?`, [batch]); }
 export function setCategory(txId, catId){
   db.run(`UPDATE transactions SET category_id=? WHERE id=?`, [catId, txId]);
+  syncMirror(txId);           // moving a cash withdrawal away drops its wallet mirror (no double count)
   learnFromTx(txId, catId);   // every manual correction teaches the model
 }
 
@@ -274,7 +306,7 @@ export function addAccount({name,type,bank,currency,opening_balance,color}){
   return db.lastId();
 }
 export function updateAccount(id, fields){
-  const allowed = ['name','type','currency','color'];
+  const allowed = ['name','type','currency','color','opening_balance'];
   const keys = Object.keys(fields).filter(k=>allowed.includes(k));
   if(!keys.length) return;
   db.run(`UPDATE accounts SET ${keys.map(k=>k+'=?').join(',')} WHERE id=?`, [...keys.map(k=>fields[k]), id]);
@@ -282,7 +314,7 @@ export function updateAccount(id, fields){
 export const accountTxCount = (id) => db.get(`SELECT COUNT(*) AS c FROM transactions WHERE account_id=?`, [id]).c;
 // Delete an account and all of its transactions.
 export function deleteAccount(id){
-  db.run(`DELETE FROM transactions WHERE account_id=?`, [id]);
+  deleteWhere('WHERE account_id=?', [id]);   // cascades to Novčanik mirror rows
   db.run(`DELETE FROM accounts WHERE id=?`, [id]);
 }
 
@@ -305,4 +337,20 @@ export function recategorizeAll(onlyDefault=true){
     if(cat && cat !== t.category_id){ db.run(`UPDATE transactions SET category_id=? WHERE id=?`,[cat,t.id]); changed++; }
   }
   return changed;
+}
+
+// One-time (migration v11): debit "Transfer drugima" rows paid to a company are
+// re-run through the categorizer (learned memory first, so the user's own explicit
+// choices are kept). Returns how many changed.
+export function fixCompanyTransfers(){
+  const m = catMap(); const tr = m['Transfer drugima']; if(!tr) return 0;
+  const rules = getRules(); const ctx = buildCtx();
+  const def = m['Ostalo / Nekategorisano'];
+  let n = 0;
+  for(const t of db.all(`SELECT * FROM transactions WHERE category_id=? AND amount<0`, [tr])){
+    if(!isCompany(t.counterparty || t.merchant)) continue;
+    const c = categorize(t, rules, false, ctx) ?? def;
+    if(c != null && c !== tr){ db.run(`UPDATE transactions SET category_id=? WHERE id=?`, [c, t.id]); n++; }
+  }
+  return n;
 }

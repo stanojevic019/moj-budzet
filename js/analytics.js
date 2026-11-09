@@ -117,21 +117,6 @@ export function recurring(rates, range){
   return list.sort((a,b)=>b.median-a.median);
 }
 
-// Headline KPIs.
-export function kpis(rates, m=null){
-  m = m || monthly(rates);
-  if(!m.length) return null;
-  const cur = m[m.length-1], prev = m[m.length-2];
-  const avgSpend = m.reduce((s,x)=>s+x.spending,0)/m.length;
-  const avgInc = m.reduce((s,x)=>s+x.realIncome,0)/m.length;
-  const totalSaved = m.reduce((s,x)=>s+x.net,0);
-  const top = categoryBreakdown(cur.month,'expense',rates)[0] || null;
-  const momSpend = prev && prev.spending ? (cur.spending-prev.spending)/prev.spending*100 : null;
-  const savingsRate = cur.realIncome ? cur.net/cur.realIncome*100 : null;
-  const avgSavingsRate = avgInc ? (avgInc-avgSpend)/avgInc*100 : null;
-  return { current:cur, prev, avgSpend, avgInc, totalSaved, top, momSpend, savingsRate, avgSavingsRate, monthsCount:m.length };
-}
-
 // ---------- budgets ----------
 // `period` may be a month, a {from,to} range, or null. For multi-month periods
 // pass `monthsCount` so the (monthly) budget amount is scaled to the window.
@@ -166,10 +151,22 @@ export function projection(month, rates, todayISO){
   const [y,m] = month.split('-').map(Number);
   const daysInMonth = new Date(y, m, 0).getDate();
   const day = Number(todayISO.slice(8,10));
-  const r = db.get(`SELECT COALESCE(SUM(ABS(amount)*${convExpr(rates)}),0) AS s
-    FROM transactions WHERE amount<0 AND substr(date,1,7)=?`, [month]);
   if(day<1) return null;
-  return { spent:r.s, projected: r.s/day*daysInMonth, day, daysInMonth };
+  // real spending only (same definition as the "Potrošnja" KPI it sits next to)
+  const spent = spendingBetween(`${month}-01`, todayISO, rates);
+  return { spent, projected: spent/day*daysInMonth, day, daysInMonth };
+}
+
+// Real spending (RSD, excludes transfers/cash/FX/principal) between two ISO dates, inclusive.
+export function spendingBetween(fromISO, toISO, rates){
+  const ex = excludedIds(EXCLUDE_SPENDING);
+  return db.get(`SELECT COALESCE(SUM(ABS(amount)*${convExpr(rates)}),0) AS s
+    FROM transactions WHERE amount<0 AND date>=? AND date<=?
+    ${ex.length?`AND (category_id IS NULL OR category_id NOT IN (${ex.join(',')}))`:''}`, [fromISO, toISO]).s;
+}
+function excludedIds(names){
+  if(!names.length) return [];
+  return db.all(`SELECT id FROM categories WHERE name IN (${names.map(()=>'?').join(',')})`, names).map(r=>+r.id);
 }
 
 // ---------- net-worth over time ----------
@@ -195,9 +192,11 @@ export function netWorthSeries(rates){
 export function categoryMovers(curPeriod, prevPeriod, rates){
   const cats = catLookup();
   const conv = convExpr(rates);
+  const ex = excludedIds(EXCLUDE_SPENDING);   // transfers/cash/FX aren't "spending" movers
+  const exSql = ex.length ? `AND (category_id IS NULL OR category_id NOT IN (${ex.join(',')}))` : '';
   const q = (period)=>{ const { cond, params } = monthCond(period);
     const rows=db.all(`SELECT category_id, SUM(ABS(amount)*${conv}) AS t
-      FROM transactions WHERE amount<0 ${cond?'AND '+cond:''} GROUP BY category_id`, params);
+      FROM transactions WHERE amount<0 ${exSql} ${cond?'AND '+cond:''} GROUP BY category_id`, params);
     const map={}; rows.forEach(r=>map[r.category_id]=r.t); return map; };
   const cur=q(curPeriod), prev=prevPeriod?q(prevPeriod):{};
   const ids=new Set([...Object.keys(cur), ...Object.keys(prev)]);

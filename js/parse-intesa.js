@@ -11,7 +11,7 @@
 // running balance ("Stanje") is used as an independent cross-check.
 
 const DATE = /^\d{2}\.\d{2}\.\d{4}$/;
-const RSD  = /^\d{1,3}(\.\d{3})*,\d{1,2}$/;       // 1.234,56 (also matches split "175.600,0")
+const RSD  = /^-?\d{1,3}(\.\d{3})*,\d{1,2}$/;     // 1.234,56 / -1.234,56 (also matches split "175.600,0")
 const PERIOD = /^\d+\.\d{2,4}$/;                    // 0.00 / 120.2687 / 21.51
 const CCY = /^[A-Z]{3}$/;
 
@@ -22,7 +22,7 @@ const FOOTER_TOK = /^(PIB:?|Mati[čc]ni|Milentija|Popovi[ćc]a|908-16001|žiro|�
 function num(s){ return parseFloat(s.replace(/\./g,'').replace(',', '.')); }
 
 function findAccountNumber(lines){
-  // header: "broj 160000000012345678 za mesec"
+  // header: "broj 160000000012345678 za mesec" (example)
   for(const ln of lines){
     const m = ln.match(/broj\s+(\d{12,20})\s+za mesec/i);
     if(m) return m[1];
@@ -32,9 +32,9 @@ function findAccountNumber(lines){
 }
 
 function findOpening(items){
-  // "Početno stanje: RSD 12.345,67" or "... EUR 33,25" (account may be RSD or EUR)
+  // "Početno stanje: RSD 12.345,67" or "... EUR -3,25" (account may be RSD or EUR; overdraft = negative)
   const flat = items.map(i=>i.str).join(' ');
-  const m = flat.match(/stanje:?\s*([A-Z]{3})\s*([\d.]+,\d{2})/i);
+  const m = flat.match(/stanje:?\s*([A-Z]{3})\s*(-?[\d.]+,\d{2})/i);
   return m ? { amount: num(m[2]), currency: m[1].toUpperCase() } : { amount: null, currency: 'RSD' };
 }
 
@@ -68,9 +68,7 @@ export function parseIntesaPages(pages){
   // Booking-date items = date in the leftmost (Knjiženje) column.
   const dateItems = allItems
     .filter(i => i.x < 75 && DATE.test(i.str))
-    .sort((a,b) => (b.pi - a.pi) * -1e6 + (b.y - a.y) * -1 ); // page asc, then y desc
-  // sort properly: page ascending, within page y descending (top->bottom)
-  dateItems.sort((a,b) => a.pi !== b.pi ? a.pi - b.pi : b.y - a.y);
+    .sort((a,b) => a.pi !== b.pi ? a.pi - b.pi : b.y - a.y);   // page asc, then top→bottom
 
   const txns = [];
   let prevBalance = opening;
@@ -121,7 +119,7 @@ function assignFields(band, cols){
   // money items (right-aligned numbers in Isplate/Uplate/Stanje area). Include lone
   // digit fragments ("5", "0") that are the wrapped tail of a split amount.
   const money = band.filter(i => (i.x > 250) && (i.x < 470) &&
-    (RSD.test(i.str) || /^\d{1,2}$/.test(i.str) || /^\d{1,3}(\.\d{3})*,\d$/.test(i.str)));
+    (RSD.test(i.str) || /^\d{1,2}$/.test(i.str) || /^-?\d{1,3}(\.\d{3})*,\d$/.test(i.str)));
   // group split money items by column using right edge
   let debit=[], credit=[], balanceArr=[];
   for(const m of money){
@@ -273,6 +271,7 @@ export function parseUniCredit(pages){
     if(cur && groups.has(cur)) groups.get(cur).push(i);
   }
   const n = (s) => parseFloat(String(s).replace(/[^\d.]/g,'')) || 0;
+  const nSigned = (s) => (/-/.test(s) ? -1 : 1) * n(s);       // overdraft → negative balance
   const txns = [];
   for(const d of dateItems){
     const band = groups.get(d);
@@ -288,7 +287,7 @@ export function parseUniCredit(pages){
       bookingDate: d.str, description: detalji, counterparty:'',
       amount: round2(value), signed: round2(sign*value), sign: sign>0?'credit':'debit',
       currency, ref: id || detalji.slice(0,24), fee:0, fx:null,
-      balance: stanjeStr ? round2(n(stanjeStr)) : null,
+      balance: stanjeStr ? round2(nSigned(stanjeStr)) : null,
     });
   }
   let opening = null;

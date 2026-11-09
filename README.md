@@ -34,6 +34,11 @@ Aplikacija radi i offline nakon prvog otvaranja.
 - Baza (SQLite preko sql.js) čuva se lokalno u IndexedDB, uvek šifrovana.
 - **Automatsko zaključavanje** pri neaktivnosti i **režim skrivanja iznosa** (privatnost).
 - Lozinka se nigde ne pamti; ako se zaboravi, podaci se ne mogu povratiti.
+- **Zaključavanje u pozadini** — kad je aplikacija u pozadini duže od minuta, zaključava se;
+  sadržaj se zamagljuje u pregledu otvorenih aplikacija.
+- **Rezervna kopija** (Više → 💾) — šifrovani `.mbbackup` fajl (isti AES-256-GCM, tvoja
+  lozinka). Vraća se iz podešavanja ili sa ekrana za otključavanje, i na drugom uređaju.
+  Podaci postoje samo na uređaju, pa redovno pravi kopiju.
 
 ## Auto-update
 

@@ -191,7 +191,7 @@ export const SEED_RULES = [
   ['TEMU','Šoping',2],
   ['UNICEF','Pokloni i donacije',2],
   ['PL:ACC','Interni prenos',2],
-  // — derived from the user's statements (recurring merchants) —
+  // — common merchants / generic keywords —
   ['CATERING','Restorani i kafići',3],
   ['RESTORAN','Restorani i kafići',3],
   ['TYRES','Servis i delovi',3],
@@ -258,6 +258,29 @@ export function predict(text, model, isCredit){
   return prob >= 0.7 ? { category_id: top.cid, prob } : null;   // only confident guesses
 }
 
+// ---------- rule matching ----------
+const PERSON_TRANSFER = 'Transfer drugima';
+const WORD = /[A-Z0-9ČĆŽŠĐ]/;
+// Substring match that must START at a word boundary ("GRAM" ≠ "INSTAGRAM").
+// Very short letter-only keywords (≤3, e.g. MTS, HBO, OMV) must also END at one,
+// so "MTS" doesn't fire inside an unrelated word. Longer keywords stay prefixes
+// on purpose ("KAMAT" → KAMATE, "PIZZ" → PIZZERIA).
+export function ruleMatches(hay, match){
+  if(!match) return false;
+  const strictEnd = match.length <= 3 && /^[A-Z]+$/.test(match);
+  let i = hay.indexOf(match);
+  while(i !== -1){
+    const before = i === 0 ? '' : hay[i-1];
+    const after = hay[i + match.length] || '';
+    if(!WORD.test(before) && !(strictEnd && WORD.test(after))) return true;
+    i = hay.indexOf(match, i + 1);
+  }
+  return false;
+}
+// Legal-entity markers in a Serbian payee name (DOO, AD, JKP, preduzetnik…).
+const COMPANY = /(^|[^A-Z0-9ČĆŽŠĐ])(D\.?\s?O\.?\s?O\.?|A\.?\s?D\.?|ADO|J\.?K\.?P\.?|J\.?P\.?|SZR|STR|SUR|PR|PREDUZETNIK|PREDUZEĆE|PREDUZECE)(?=$|[^A-Z0-9ČĆŽŠĐ])/;
+export function isCompany(name){ return COMPANY.test(String(name||'').toUpperCase()); }
+
 // Apply rules + learning to one transaction-like object. Returns categoryId or null.
 // ctx = { learned: {key->catId}, model } (optional). Priority: learned → rules → ML.
 // `rules` rows carry the category `kind` (from getRules' join). Matching is
@@ -266,20 +289,33 @@ export function predict(text, model, isCredit){
 // (insert time) or merchant (DB row, on re-categorization).
 export function categorize(tx, rules, isCredit, ctx){
   const merch = tx.merchant_clean || tx.merchant || '';
-  // 1) learned exact merchant (taught by the user) — strongest
+  const kindOk = (kind) => !((kind === 'income' && !isCredit) || (kind === 'expense' && isCredit));
+  // 1) learned exact merchant (taught by the user) — strongest, but sign-aware:
+  //    a refund (credit) from a shop must not inherit that shop's expense category.
   if(ctx && ctx.learned){
     const k = merchantKey(merch, tx.description);
-    if(k && ctx.learned[k] != null) return ctx.learned[k];
+    const cid = k ? ctx.learned[k] : null;
+    if(cid != null && (!ctx.kind || kindOk(ctx.kind[cid]))) return cid;
   }
   // 2) explicit keyword rules
   const hay = `${merch} ${tx.description||''} ${tx.counterparty||''}`.toUpperCase();
-  let best = null;
+  const party = `${merch} ${tx.counterparty||''}`.toUpperCase();
+  let best = null, bestParty = null;
   for(const r of rules){
-    if(r.kind === 'income'  && !isCredit) continue;
-    if(r.kind === 'expense' &&  isCredit) continue;
-    if(hay.includes(r.match)){
+    if(!kindOk(r.kind)) continue;
+    if(ruleMatches(hay, r.match)){
       if(best === null || r.priority < best.priority) best = r;
     }
+    // best rule matched on the payee alone (ignores the "transfer" wording in the description)
+    if(r.kind !== 'transfer' && ruleMatches(party, r.match)){
+      if(bestParty === null || r.priority < bestParty.priority) bestParty = r;
+    }
+  }
+  // A bank transfer to a COMPANY is a payment (fuel, insurance, shop…), i.e. real
+  // spending — not "Transfer drugima". Prefer the payee's merchant rule; with none,
+  // leave it uncategorized (counts as spending, the user can teach it).
+  if(best && best.cat_name === PERSON_TRANSFER && !isCredit && isCompany(tx.counterparty || merch)){
+    return bestParty ? bestParty.category_id : null;
   }
   if(best) return best.category_id;
   // 3) on-device ML prediction (only when confident)

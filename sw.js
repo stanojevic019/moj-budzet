@@ -1,6 +1,7 @@
 // Offline service worker: cache-first for the app shell + libraries.
-// Bump CACHE when files change to force an update.
-const CACHE = 'moj-budzet-v26';
+// Bump CACHE whenever any file below changes — that is what makes installed apps
+// see the "Nova verzija" banner.
+const CACHE = 'moj-budzet-v27';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest',
   './css/style.css',
@@ -15,7 +16,10 @@ const ASSETS = [
 self.addEventListener('install', e => {
   // Do NOT skipWaiting automatically — the new version waits until the user taps
   // "Osveži", then we skipWaiting + reload (auto-update UX without surprise reloads).
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+  // cache:'reload' bypasses the browser HTTP cache (GitHub Pages serves max-age=600),
+  // so a new version never gets packaged with stale copies of the old files.
+  e.waitUntil(caches.open(CACHE).then(c =>
+    c.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' })))));
 });
 self.addEventListener('message', e => { if(e.data === 'skipWaiting') self.skipWaiting(); });
 self.addEventListener('activate', e => {
@@ -26,9 +30,11 @@ self.addEventListener('fetch', e => {
   if(e.request.method !== 'GET') return;
   e.respondWith(
     caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
-      const copy = res.clone();
-      caches.open(CACHE).then(c => c.put(e.request, copy)).catch(()=>{});
+      if(res && res.ok && new URL(e.request.url).origin === self.location.origin){
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(()=>{});
+      }
       return res;
-    }).catch(()=> caches.match('./index.html')))
+    }).catch(() => e.request.mode === 'navigate' ? caches.match('./index.html') : Response.error()))
   );
 });

@@ -189,3 +189,5 @@ code{background:var(--bg2); padding:2px 7px; border-radius:6px; font-size:.85em}
 .hide-amounts .cl b,.hide-amounts .tx-summary .pos,.hide-amounts .tx-summary .neg,
 .hide-amounts .rec-row b,.hide-amounts .bbar-top span:last-child,.hide-amounts .ar-name~b{
   filter:blur(8px); transition:filter .15s; user-select:none}
+/* hidden-app privacy: blur content so the OS app-switcher thumbnail doesn't show amounts */
+.privacy-blur #app{filter:blur(18px);}

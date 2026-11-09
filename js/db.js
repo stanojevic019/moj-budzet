@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -112,13 +112,74 @@ export async function unlock(passphrase){
 export function lock(){ db = null; cryptoKey = null; }
 export function isOpen(){ return !!db; }
 
-export async function save(){
+// Saves are serialized: each one snapshots the DB only when its turn comes, so an
+// older snapshot can never finish after (and overwrite) a newer one.
+let saveChain = Promise.resolve();
+async function doSave(){
   if(!db || !cryptoKey) return;
-  const bytes = db.export();
-  await idbSet('db', await encryptBytes(cryptoKey, bytes));
+  const key = cryptoKey, bytes = db.export();
+  await idbSet('db', await encryptBytes(key, bytes));
+}
+export function save(){
+  const p = saveChain.then(doSave);
+  saveChain = p.catch(()=>{});   // keep the queue alive after a failure
+  return p;                      // …but report it to the caller
+}
+// Wait for pending saves (call before lock/reload so the last change isn't lost).
+export function flush(){ return saveChain; }
+
+// Ask the browser not to evict our storage under pressure / inactivity (best-effort).
+export async function requestPersistence(){
+  try {
+    if(navigator.storage && navigator.storage.persist){
+      if(await navigator.storage.persisted()) return true;
+      return await navigator.storage.persist();
+    }
+  } catch {}
+  return false;
 }
 
-export async function changePassphrase(newPass){
+// Check a passphrase against the stored verifier without changing any state.
+export async function verifyPassphrase(passphrase){
+  const salt = await idbGet('salt'), verifier = await idbGet('verifier');
+  if(!salt || !verifier) return false;
+  const kdf = await idbGet('kdf');
+  const key = await deriveKey(passphrase, salt, (kdf && kdf.iterations) || LEGACY_ITERATIONS);
+  return checkVerifier(key, verifier);
+}
+
+// ---------- encrypted backup file ----------
+// The backup is the vault exactly as stored (already encrypted with the user's
+// passphrase) — nothing is ever written in plaintext. Restoring it needs the
+// passphrase that was active when the backup was made.
+const b64 = (u8) => { let s=''; for(let i=0;i<u8.length;i+=0x8000) s+=String.fromCharCode.apply(null, u8.subarray(i,i+0x8000)); return btoa(s); };
+const unb64 = (str) => { const s=atob(str); const u=new Uint8Array(s.length); for(let i=0;i<s.length;i++) u[i]=s.charCodeAt(i); return u; };
+export async function exportBackup(){
+  await save();                                  // include the latest in-memory state
+  const [salt, kdf, verifier, blob] = await Promise.all(['salt','kdf','verifier','db'].map(idbGet));
+  if(!salt || !verifier || !blob) throw new Error('empty');
+  return JSON.stringify({ app:'moj-budzet', format:1, created:new Date().toISOString(),
+    kdf: kdf || { iterations: LEGACY_ITERATIONS }, salt:b64(salt), verifier:b64(verifier), db:b64(blob) });
+}
+// Replaces the vault on this device with the backup (caller confirms first).
+export async function importBackup(text){
+  let o; try { o = JSON.parse(text); } catch { throw new Error('format'); }
+  if(!o || o.app!=='moj-budzet' || o.format!==1 || !o.salt || !o.verifier || !o.db) throw new Error('format');
+  let salt, verifier, blob;
+  try { salt = unb64(o.salt); verifier = unb64(o.verifier); blob = unb64(o.db); } catch { throw new Error('format'); }
+  const kdf = { iterations: +(o.kdf && o.kdf.iterations) || LEGACY_ITERATIONS };
+  db = null; cryptoKey = null;
+  await idbSetMany([['salt', salt], ['kdf', kdf], ['verifier', verifier], ['db', blob]]);
+}
+
+// Runs inside the save queue: a save still in flight under the OLD key could
+// otherwise land after the new verifier and leave the vault undecryptable.
+export function changePassphrase(newPass){
+  const p = saveChain.then(() => rekey(newPass));
+  saveChain = p.catch(()=>{});
+  return p;
+}
+async function rekey(newPass){
   if(!db) return;
   const salt = randomBytes(16);
   const iterations = DEFAULT_ITERATIONS;
@@ -325,7 +386,7 @@ function migrate(){
       ['AUTO DELOVI','Servis i delovi',2],['AUTODELOVI','Servis i delovi',2],
       ['MOZZART','Zabava',2],['BIOSKOP','Zabava',2],['CINEPLEXX','Zabava',2],['POZORI','Zabava',2],['SEPHORA','Lična nega',2],['NOTINO','Lična nega',2],
       ['FRIZER','Lična nega',2],['JAVNO KOMUNALNO','Računi i režije',2],['JKP','Računi i režije',3],
-      ['NAPLATNA RAMP','Putarina i parking',2],];
+      ['NAPLATNA RAMP','Putarina i parking',2]];
     for(const [mt, cat, pr] of addRules){
       if(get(`SELECT id FROM rules WHERE match=?`, [mt])) continue;
       const c = get(`SELECT id FROM categories WHERE name=?`, [cat]); if(!c) continue;
@@ -351,6 +412,13 @@ function migrate(){
     setSetting('mirror_atm','1');
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','10') ON CONFLICT(key) DO UPDATE SET value='10'`);
     v = 10;
+  }
+  if(v < 11){
+    // bank transfers to companies were filed as "Transfer drugima" (excluded from
+    // spending). The app re-runs them through the categorizer once after unlock.
+    setSetting('fix_company_transfers','1');
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','11') ON CONFLICT(key) DO UPDATE SET value='11'`);
+    v = 11;
   }
 }
 

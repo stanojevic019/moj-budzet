@@ -1,7 +1,7 @@
 // Encryption layer. All data is encrypted at rest with a key derived from the
 // user's passphrase. Nothing ever leaves the device.
 //
-//   passphrase --PBKDF2(SHA-256, 310k)--> AES-GCM 256-bit key
+//   passphrase --PBKDF2(SHA-256, 600k; legacy vaults 310k, upgraded on unlock)--> AES-GCM 256-bit key
 //   DB bytes  --AES-GCM(random 12-byte IV)--> ciphertext stored in IndexedDB
 //
 // The passphrase itself is never stored. A small "verifier" token (a known string
