@@ -442,3 +442,12 @@ export function get(sql, params=[]){ const r = all(sql, params); return r[0] || 
 export function run(sql, params=[]){ db.run(sql, params); }
 export function lastId(){ return db.exec(`SELECT last_insert_rowid() AS id`)[0].values[0][0]; }
 export function exportBytes(){ return db.export(); }
+// Undo support: an in-memory copy of the whole DB taken right before a destructive
+// action; restoring it swaps the live DB back (caller then saves). Never persisted.
+export function snapshot(){ return db ? db.export() : null; }
+export function restoreSnapshot(bytes){
+  if(!bytes || !SQL || !cryptoKey) return false;
+  const old = db; db = new SQL.Database(bytes);
+  try { old && old.close(); } catch {}
+  return true;
+}

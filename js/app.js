@@ -24,10 +24,40 @@ let persistentStorage = null; // navigator.storage.persist() result (null = unkn
 const todayISO = () => todayLocal();
 
 // ---------- formatting ----------
-const nf = (cur) => new Intl.NumberFormat('sr-RS', { style:'currency', currency:cur, maximumFractionDigits:0 });
+// Every amount on screen goes through fmt/fmtN, so "hide amounts" masks them all
+// at the source (text, insights, chart axes and tooltips) — not via a CSS list.
+let HIDE = false;
+const MASK = '•••••';
+const nfCache = {};
+const nf = (cur) => nfCache[cur] || (nfCache[cur] = new Intl.NumberFormat('sr-RS', { style:'currency', currency:cur, maximumFractionDigits:0 }));
 const nf2 = new Intl.NumberFormat('sr-RS', { maximumFractionDigits:0 });
-function fmt(n, cur='RSD'){ return nf(cur).format(n||0); }
-function fmtN(n){ return nf2.format(Math.round(n||0)); }
+function fmt(n, cur='RSD'){ return HIDE ? `${MASK} ${cur}` : nf(cur).format(n||0); }
+function fmtN(n){ return HIDE ? MASK : nf2.format(Math.round(n||0)); }
+const MONTHS_LONG = ['','januar','februar','mart','april','maj','jun','jul','avgust','septembar','oktobar','novembar','decembar'];
+const MONTHS_SHORT = ['','jan','feb','mar','apr','maj','jun','jul','avg','sep','okt','nov','dec'];
+// 'YYYY-MM' → "jun 2026"
+const fmtMonthLong = (ym) => { const [y,m] = ym.split('-'); return `${MONTHS_SHORT[+m]} ${y}`; };
+// range label: "jan – jun 2026" / "dec 2025 – jun 2026"
+function fmtRange(from, to){
+  if(from===to) return fmtMonthLong(to);
+  const [fy,fm] = from.split('-'), [ty,tm] = to.split('-');
+  return fy===ty ? `${MONTHS_SHORT[+fm]} – ${MONTHS_SHORT[+tm]} ${ty}` : `${fmtMonthLong(from)} – ${fmtMonthLong(to)}`;
+}
+// 'YYYY-MM-DD' → "Danas" / "Juče" / "29. jun 2026"
+function fmtDay(iso){
+  const t = todayLocal();
+  const y = new Date(Date.parse(t) - 86400000).toISOString().slice(0,10);
+  if(iso===t) return 'Danas'; if(iso===y) return 'Juče';
+  const [yy,mm,dd] = iso.split('-');
+  return `${+dd}. ${MONTHS_LONG[+mm]} ${yy}`;
+}
+// Statement names → readable: "Kupovina PAYSPOT DOO*BURGER HU BEOGRAD RS" → "PAYSPOT DOO · BURGER HU BEOGRAD"
+function displayName(s){
+  return String(s||'')
+    .replace(/^(kupovina|plaćanje|placanje|uplata|isplata)\s+/i,'')
+    .replace(/\s+[A-Z]{2}$/,'')          // trailing country code
+    .replace(/\*/g,' · ').replace(/\s+/g,' ').trim() || '—';
+}
 function pct(n){ return (n>=0?'+':'') + (n==null?'–':n.toFixed(0)) + '%'; }
 const esc = (s) => (s==null?'':String(s)).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const todayLocal = () => { const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); };
@@ -64,10 +94,62 @@ function rates(){
 const hideAmounts = () => db.getSetting('hide_amounts','0')==='1';
 const accent = () => db.getSetting('accent', '#3b82f6');
 const autolockMin = () => +db.getSetting('autolock_min','5');
-function applyPrefs(){
-  document.body.classList.toggle('hide-amounts', hideAmounts());
-  document.documentElement.style.setProperty('--accent', accent());
+const theme = () => db.getSetting('theme', 'auto');   // auto | dark | light
+// Theme is also mirrored to localStorage (not sensitive) so the lock screen matches.
+function applyTheme(t){
+  const root = document.documentElement;
+  if(t==='dark' || t==='light') root.dataset.theme = t; else delete root.dataset.theme;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if(meta) meta.content = getComputedStyle(document.body).getPropertyValue('--bg').trim() || '#0b1120';
+  try { localStorage.setItem('mb-theme', t); } catch {}
 }
+function applyPrefs(){
+  HIDE = hideAmounts();
+  document.body.classList.toggle('hide-amounts', HIDE);
+  document.documentElement.style.setProperty('--accent', accent());
+  applyTheme(theme());
+}
+// Chart.js reads colors from the active theme (axes, grid, legend text).
+function chartTheme(){
+  const C = window.Chart; if(!C) return;
+  const cs = getComputedStyle(document.body);
+  C.defaults.color = cs.getPropertyValue('--muted').trim();
+  C.defaults.borderColor = cs.getPropertyValue('--line').trim();
+}
+// Income/expense colors: blue vs orange stay distinguishable with red-green color blindness.
+const C_INC = '#38bdf8', C_EXP = '#f97316', C_SAVE = '#a78bfa';
+
+// ---------- icons (inline SVG: identical on every platform, unlike emoji) ----------
+const svg = (p) => `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${p}</svg>`;
+const ICON = {
+  dash: svg('<path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/>'),
+  tx: svg('<path d="M9 6h12M9 12h12M9 18h12"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>'),
+  budget: svg('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>'),
+  bank: svg('<path d="M3 21h18M5 21v-9M10 21v-9M14 21v-9M19 21v-9M2.5 10 12 4l9.5 6z"/>'),
+  more: svg('<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>'),
+  eye: svg('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'),
+  eyeOff: svg('<path d="M2 12s3.5-7 10-7c2 0 3.7.6 5.1 1.5M22 12s-3.5 7-10 7c-2 0-3.7-.6-5.1-1.5"/><path d="M3 3l18 18"/>'),
+  lock: svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
+  plus: svg('<path d="M12 5v14M5 12h14"/>'),
+};
+
+// ---------- accessibility pass (after every render / modal) ----------
+// Tappable non-buttons become keyboard/screen-reader buttons; inputs that only
+// have a placeholder get it as their accessible name.
+function a11y(root){
+  root.querySelectorAll('[data-action]:not(button):not(input):not(select):not(a),[data-cat].catp')
+    .forEach(el => { if(!el.hasAttribute('role')){ el.setAttribute('role','button'); el.tabIndex = 0; } });
+  root.querySelectorAll('input:not([type=hidden]),select').forEach(el => {
+    if(el.getAttribute('aria-label') || el.closest('label')) return;
+    const name = el.placeholder || el.dataset.filter;
+    if(name) el.setAttribute('aria-label', el.placeholder || ({month:'Mesec',account:'Račun',category:'Kategorija'}[el.dataset.filter]) || name);
+  });
+}
+document.addEventListener('keydown', e => {
+  if((e.key==='Enter' || e.key===' ') && e.target.getAttribute && e.target.getAttribute('role')==='button'){
+    e.preventDefault(); e.target.click();
+  }
+});
 
 async function persist(){
   try { await db.save(); }
@@ -78,14 +160,33 @@ async function lockNow(){
   try { await db.flush(); } catch {}
   db.lock(); location.reload();
 }
-function toast(msg, ok=true){
-  const t = document.createElement('div'); t.className = 'toast '+(ok?'ok':'err'); t.textContent = msg;
+// toast(msg, ok, action?) — action = { label, fn } adds a button (e.g. "Poništi").
+function toast(msg, ok=true, action=null){
+  document.querySelectorAll('.toast').forEach(x => x.remove());   // one at a time, no stacking
+  const t = document.createElement('div'); t.className = 'toast '+(ok?'ok':'err');
+  t.setAttribute('role', ok ? 'status' : 'alert'); t.setAttribute('aria-live', ok ? 'polite' : 'assertive');
+  const span = document.createElement('span'); span.textContent = msg; t.appendChild(span);
+  if(action){
+    const b = document.createElement('button'); b.className = 'toast-act'; b.textContent = action.label;
+    b.onclick = () => { t.remove(); action.fn(); }; t.appendChild(b);
+  }
   document.body.appendChild(t); setTimeout(()=>t.classList.add('show'),10);
-  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),300); }, 3200);
+  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),300); }, action ? 7000 : 3200);
+}
+// Run a destructive change with a one-tap undo (in-memory DB snapshot).
+async function withUndo(doneMsg, fn){
+  const snap = db.snapshot();
+  const res = fn();
+  await persist(); render();
+  toast(doneMsg, true, { label:'Poništi', fn: async () => {
+    if(db.restoreSnapshot(snap)){ await persist(); render(); toast('Poništeno.'); }
+  }});
+  return res;
 }
 
 // =================================================================== LOCK
 async function boot(){
+  try { applyTheme(localStorage.getItem('mb-theme') || 'auto'); } catch {}
   registerSW();
   app.addEventListener('click', onClick); // bound once (not per unlock)
   window.addEventListener('popstate', onBack);
@@ -100,8 +201,8 @@ function renderLock(exists){
       <div class="logo">💰</div>
       <h1>Moj Budžet</h1>
       <p class="sub">${exists ? 'Unesi lozinku da otključaš svoje podatke.' : 'Postavi lozinku. Njome se <b>šifruju</b> svi tvoji podaci na ovom uređaju. Ako je zaboraviš, podaci se ne mogu povratiti.'}</p>
-      <input type="password" id="pp" placeholder="Lozinka" autocomplete="${exists?'current-password':'new-password'}" />
-      ${exists?'':'<input type="password" id="pp2" placeholder="Ponovi lozinku" autocomplete="new-password" />'}
+      <input type="password" id="pp" placeholder="Lozinka" aria-label="Lozinka" autocomplete="${exists?'current-password':'new-password'}" />
+      ${exists?'':'<input type="password" id="pp2" placeholder="Ponovi lozinku" aria-label="Ponovi lozinku" autocomplete="new-password" />'}
       <button id="lockBtn" class="primary big">${exists?'Otključaj':'Kreiraj sef'}</button>
       <div class="lock-err" id="lockErr"></div>
       <button class="ghost" id="lockRestore" style="margin-top:10px">📂 Vrati iz rezervne kopije</button>
@@ -139,20 +240,24 @@ function enterApp(){
     <header class="topbar">
       <div class="brand">💰 Moj Budžet</div>
       <div class="tb-actions">
-        <button class="iconbtn" data-action="toggle-hide" title="Sakrij/prikaži iznose">${hideAmounts()?'🙈':'👁️'}</button>
-        <button class="iconbtn" data-action="lock" title="Zaključaj">🔒</button>
+        <button class="iconbtn" data-action="toggle-hide" title="Sakrij/prikaži iznose" aria-label="${HIDE?'Prikaži iznose':'Sakrij iznose'}" aria-pressed="${HIDE}">${HIDE?ICON.eyeOff:ICON.eye}</button>
+        <button class="iconbtn" data-action="lock" title="Zaključaj" aria-label="Zaključaj">${ICON.lock}</button>
       </div>
     </header>
-    <div id="updateBanner" class="update-banner hidden">⬆️ Nova verzija je dostupna. <button data-action="do-update">Osveži</button></div>
+    <div id="updateBanner" class="update-banner hidden" role="status">⬆️ Nova verzija je dostupna. <button data-action="do-update">Osveži</button></div>
     <main id="screen"></main>
-    <button class="fab" data-action="fab" title="Dodaj">＋</button>
-    <nav class="tabbar">
-      ${tab('dashboard','📊','Pregled')}
-      ${tab('tx','🧾','Transakcije')}
-      ${tab('budgets','🎯','Budžeti')}
-      ${tab('accounts','🏦','Računi')}
-      ${tab('settings','⚙️','Više')}
+    <button class="fab" data-action="fab" title="Dodaj" aria-label="Dodaj transakciju ili uvezi izvod">${ICON.plus}</button>
+    <nav class="tabbar" aria-label="Glavni meni">
+      ${tab('dashboard',ICON.dash,'Pregled')}
+      ${tab('tx',ICON.tx,'Transakcije')}
+      ${tab('budgets',ICON.budget,'Budžeti')}
+      ${tab('accounts',ICON.bank,'Računi')}
+      ${tab('settings',ICON.more,'Više')}
     </nav>`;
+  // FAB hides while scrolling down a list (so it doesn't cover amounts), returns on scroll up
+  let lastY = window.scrollY;
+  window.onscroll = () => { const f=$('.fab'); if(!f) return; const y=window.scrollY;
+    f.classList.toggle('fab-away', y > lastY + 4 && y > 120); if(y < lastY - 4) f.classList.remove('fab-away'); lastY = y; };
   if(updateReady){ const b=$('#updateBanner'); if(b) b.classList.remove('hidden'); }
   // one-time: after a migration that added rules, re-categorize the "Ostalo" backlog
   if(db.getSetting('recat_pending')==='1'){
@@ -170,20 +275,22 @@ function enterApp(){
   resetAutoLock();
   render();
 }
-const tab = (id,icon,label) => `<button class="tab ${view===id?'active':''}" data-tab="${id}"><span>${icon}</span>${label}</button>`;
+const tab = (id,icon,label) => `<button class="tab ${view===id?'active':''}" data-tab="${id}" ${view===id?'aria-current="page"':''}><span>${icon}</span>${label}</button>`;
 
 function render(){
-  app.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===view));
-  const fab = $('.fab'); if(fab) fab.style.display = view==='import' ? 'none' : '';
+  app.querySelectorAll('.tab').forEach(t=>{ const on = t.dataset.tab===view; t.classList.toggle('active', on);
+    if(on) t.setAttribute('aria-current','page'); else t.removeAttribute('aria-current'); });
+  const fab = $('.fab'); if(fab){ fab.style.display = view==='import' ? 'none' : ''; fab.classList.remove('fab-away'); }
   const s = $('#screen'); if(!s) return;
   Object.values(charts).forEach(c=>{ try{c.destroy();}catch{} });
+  chartTheme();
   if(view==='dashboard') renderDashboard(s);
   else if(view==='tx') renderTx(s);
   else if(view==='budgets') renderBudgets(s);
   else if(view==='import') renderImport(s);
   else if(view==='accounts') renderAccounts(s);
   else if(view==='settings') renderSettings(s);
-  s.scrollTop = 0;
+  a11y(s);
   ensureBackArmed();
 }
 
@@ -200,16 +307,24 @@ function onBack(){
 }
 
 // =================================================================== DASHBOARD
+// Collapsible dashboard sections: open/closed state is remembered (encrypted setting).
+const DASH_OPEN_DEFAULT = ['ie'];
+function dashOpen(){ try { return new Set(JSON.parse(db.getSetting('dash_open','null')) || DASH_OPEN_DEFAULT); } catch { return new Set(DASH_OPEN_DEFAULT); } }
+function fold(id, title, body, open, extra=''){
+  return `<details class="card fold" data-fold="${id}" ${open.has(id)?'open':''}>
+    <summary><h3>${title}</h3>${extra}</summary>${body}</details>`;
+}
+const UNCAT = 'Ostalo / Nekategorisano';
+
 function renderDashboard(s){
   const rate = rates();                  // currency→RSD map
   const m = an.monthly(rate);            // full history — drives the timeline charts
-  const balances = an.accountBalances();
   const nw = an.netWorth(rate);
   if(!m.length){
     s.innerHTML = empty('📥','Još nema podataka','Uvezi PDF izvod ili ručno dodaj transakciju da vidiš analizu.','Idi na uvoz','import');
     return;
   }
-  // selected period governs every aggregate card; the charts below stay full-history
+  // selected period governs every aggregate card and chart
   const range = resolveDashPeriod(m);
   dashRange = range;
   const periodObj = range.single ? range.from : { from:range.from, to:range.to };
@@ -243,10 +358,14 @@ function renderDashboard(s){
   for(const r of allOut){ if(exSet.has(r.name)) continue; const g=groupOf(r.id); if(!g) continue;
     const e = gAgg[g.id] || (gAgg[g.id]={ id:g.id, name:g.name, icon:g.icon, color:g.color, total:0 }); e.total += r.total; }
   const breakdown = Object.values(gAgg).sort((a,b)=>b.total-a.total).slice(0,8);
-  const topCat = allOut.filter(c=>!exSet.has(c.name))[0] || null;
+  const realOut = allOut.filter(c=>!exSet.has(c.name));
+  const topCat = realOut.find(c=>c.name!==UNCAT) || null;              // "uncategorized" is not a category to celebrate
+  const uncSpend = (realOut.find(c=>c.name===UNCAT)||{total:0}).total;
+  const uncShare = pSpending>0 ? uncSpend/pSpending*100 : 0;
+  const uncN = repo.uncategorizedCount();
   const flows = allOut.filter(c=>exSet.has(c.name));                   // transfers, cash, FX, loan principal
   const rec = an.recurring(rate);   // subscriptions need multiple months → always full history
-  const recMonthly = rec.reduce((s,r)=>s+r.median,0);
+  const recMonthly = rec.reduce((s,r)=>s+r.monthly,0);
   const nwsAll = an.netWorthSeries(rate);
   const nws = nwsAll.filter(x=> x.month>=range.from && x.month<=range.to);   // clip net-worth line to the period
   const nwTrend = nws.length>1 ? nws[nws.length-1].net - nws[nws.length-2].net : 0;
@@ -263,125 +382,107 @@ function renderDashboard(s){
   const budgets = an.budgetStatus(periodObj, rate, range.single?1:range.months);
   const overBudget = budgets.filter(b=>b.over);
   const movers = an.categoryMovers(periodObj, prevRange, rate)
-    .filter(x=>Math.abs(x.delta)>500).slice(0,5);
+    .filter(x=>Math.abs(x.delta)>500 && x.cat.name!==UNCAT).slice(0,5);
   // period summary handed to the KPI cards + insights
   const P = { label:range.label, spending:pSpending, net:pNet, realIncome:pIncome,
-    savingsRate, momSpend, cmpLabel, top:topCat };
+    savingsRate, momSpend, cmpLabel, top:topCat, uncShare, uncN };
   const months = mw.map(x=>x.label);   // charts follow the selected period
   const PERIODS = [['month','Mesec'],['3m','3m'],['6m','6m'],['12m','12m'],['ytd','Godina'],['all','Sve'],['custom','Biraj']];
+  const open = dashOpen();
 
   s.innerHTML = `
-    <div class="seg period-seg">
-      ${PERIODS.map(([v,l])=>`<button class="seg-b ${range.preset===v?'active':''}" data-action="dash-period" data-preset="${v}">${l}</button>`).join('')}
+    <div class="seg period-seg" role="group" aria-label="Period statistike">
+      ${PERIODS.map(([v,l])=>`<button class="seg-b ${range.preset===v?'active':''}" data-action="dash-period" data-preset="${v}" aria-pressed="${range.preset===v}">${l}</button>`).join('')}
     </div>
     ${range.preset==='custom'?`<div class="form-row period-custom">
       <label class="fld">Od<input type="month" id="dpFrom" min="${m[0].month}" max="${m[m.length-1].month}" value="${range.from}"></label>
       <label class="fld">Do<input type="month" id="dpTo" min="${m[0].month}" max="${m[m.length-1].month}" value="${range.to}"></label>
     </div>`:''}
-    <div class="muted small period-note">📊 Statistika za: <b>${esc(range.label)}</b>${range.single?'':` · ${range.months} mes.`}</div>
+    <div class="muted small period-note">Period: <b>${esc(range.label)}</b>${range.single?'':` · ${range.months} mes.`}${partial?' · mesec je u toku':''}</div>
 
     <div class="kpis">
-      ${kpi('Neto vrednost'+(range.preset==='all'||range.to===m[m.length-1].month?'':' · '+P.label), fmt(endNW), `${nwDelta>=0?'▲':'▼'} ${fmtN(Math.abs(nwDelta))} u periodu →`, '', 'data-action="goto" data-view="accounts"')}
-      ${kpi('Priliv · '+P.label, fmt(P.realIncome), 'prihodi u periodu →', 'good', 'data-action="kpi-income"')}
-      ${kpi('Potrošnja · '+P.label, fmt(P.spending), P.momSpend==null?'rasčlani →':`${P.momSpend<=0?'📉':'📈'} ${pct(P.momSpend)} ${cmpLabel}`, P.momSpend>0?'bad':'good', 'data-action="kpi-spend"')}
-      ${kpi('Štednja · '+P.label, fmt(P.net), P.savingsRate==null?'rasčlani →':`stopa štednje ${P.savingsRate.toFixed(0)}%`, P.net>=0?'good':'bad', 'data-action="kpi-save"')}
-      ${kpi('Prosečna potrošnja · '+P.label, fmt(avgSpend), `${monthsData} mes. · po računu →`, 'wide', 'data-action="kpi-avg"')}
+      ${kpi('Neto vrednost', fmt(endNW), `${nwDelta>=0?'▲':'▼'} ${fmtN(Math.abs(nwDelta))} u periodu`, 'wide', 'data-action="goto" data-view="accounts"')}
+      ${kpi('Priliv', fmt(P.realIncome), 'po kategorijama', '', 'data-action="kpi-income"')}
+      ${kpi('Potrošnja', fmt(P.spending), P.momSpend==null?'po kategorijama':`${P.momSpend<=0?'▼':'▲'} ${pct(P.momSpend)} ${cmpLabel}`, P.momSpend>10?'bad':'', 'data-action="kpi-spend"')}
+      ${kpi('Štednja', fmt(P.net), P.savingsRate==null?'prihodi − potrošnja':`stopa štednje ${P.savingsRate.toFixed(0)}%`, P.net>=0?'good':'bad', 'data-action="kpi-save"')}
+      ${range.single ? '' : kpi('Prosečno mesečno', fmt(avgSpend), `potrošnja · ${monthsData} mes.`, '', 'data-action="kpi-avg"')}
     </div>
+
+    ${uncN ? `<section class="card uncat" data-action="triage">
+      <div class="row-between"><h3>❓ ${uncN} ${uncN===1?'transakcija čeka':'transakcija čeka'} kategoriju</h3><span class="pill">Razvrstaj</span></div>
+      <div class="muted small">${uncShare>=1?`${uncShare.toFixed(0)}% potrošnje u periodu nije razvrstano, pa grupe i budžeti nisu tačni. `:''}Aplikacija pamti tvoj izbor i sledeći put razvrstava sama.</div>
+    </section>` : ''}
 
     ${insights(P, breakdown, recMonthly, proj)}
 
-    ${budgets.length ? `<section class="card" data-action="goto" data-view="budgets" style="cursor:pointer">
-      <div class="row-between"><h3>🎯 Budžeti · ${range.label}</h3><small>${overBudget.length?`<span class="neg">${overBudget.length} prekoračeno</span>`:'sve u okviru ✓'}</small></div>
+    ${budgets.length ? `<section class="card" data-action="goto" data-view="budgets">
+      <div class="row-between"><h3>🎯 Budžeti</h3><small>${overBudget.length?`<span class="neg">${overBudget.length} prekoračeno</span>`:'sve u okviru ✓'}</small></div>
       ${budgets.slice(0,4).map(b=>budgetBar(b)).join('')}
-      <div class="muted small" style="margin-top:6px">Dodirni za sve budžete →</div>
     </section>`:''}
 
     <section class="card">
-      <h3>Pravilo 50/30/20 · ${range.label}</h3>
+      <h3>Rashodi po grupama</h3>
+      <div class="chart-wrap small"><canvas id="cCat" role="img" aria-label="Udeo grupa u potrošnji"></canvas></div>
+      <div class="cat-legend">
+        ${breakdown.map(c=>`<div class="cl" data-action="drill-group" data-group="${c.id}"><span class="dot" style="background:${c.color}"></span><span class="cl-n">${esc(c.icon)} ${esc(c.name)}</span><b>${fmt(c.total)}</b></div>`).join('')}
+      </div>
+    </section>
+
+    ${fold('ie','Prihodi i rashodi po mesecima', `<div class="chart-wrap"><canvas id="cIE" role="img" aria-label="Prihodi i rashodi po mesecima"></canvas></div>`, open)}
+    ${fold('ratio','Pravilo 50/30/20', `
       ${ratioBar('Potrebe', ww.needs, P.realIncome, 50, '#22c55e')}
       ${ratioBar('Želje', ww.wants, P.realIncome, 30, '#f59e0b')}
       ${ratioBar('Štednja', Math.max(0,P.net), P.realIncome, 20, '#3b82f6')}
-      <div class="muted small" style="margin-top:6px">Cilj: 50% potrebe · 30% želje · 20% štednja (od prihoda ${fmt(P.realIncome)})</div>
-    </section>
-
-    <section class="card">
-      <h3>Prihodi vs rashodi po mesecima</h3>
-      <div class="chart-wrap"><canvas id="cIE"></canvas></div>
-    </section>
-
-    <section class="card">
-      <h3>Neto vrednost kroz vreme ${nwTrend>=0?'<span class="pos">📈</span>':'<span class="neg">📉</span>'}</h3>
-      <div class="chart-wrap"><canvas id="cNW"></canvas></div>
-    </section>
-
-    <section class="card nw-bridge">
-      <h3>🧮 Kako se slaže neto vrednost · ${range.label}</h3>
-      <div class="rec-row"><div>${range.preset==='all'?'Početna stanja računa':'Neto na početak perioda'}</div><b>${fmt(startNW)}</b></div>
+      <div class="muted small" style="margin-top:6px">Cilj: 50% potrebe · 30% želje · 20% štednja, od prihoda u periodu.</div>`, open)}
+    ${fold('nw',`Neto vrednost kroz vreme`, `<div class="chart-wrap"><canvas id="cNW" role="img" aria-label="Neto vrednost kroz vreme"></canvas></div>`, open,
+      `<small class="${nwTrend>=0?'pos':'neg'}">${nwTrend>=0?'▲':'▼'}</small>`)}
+    ${fold('bridge','Kako se slaže neto vrednost', `
+      <div class="rec-row"><div>${range.preset==='all'?'Početna stanja računa':'Na početku perioda'}</div><b>${fmt(startNW)}</b></div>
       <div class="rec-row"><div>＋ Realni prihodi</div><b class="pos">+${fmtN(pIncome)}</b></div>
       <div class="rec-row"><div>− Realna potrošnja</div><b class="neg">−${fmtN(pSpending)}</b></div>
       <div class="rec-row"><div>± Transferi · keš · krediti</div><b class="${otherFlows<0?'neg':'pos'}">${otherFlows<0?'−':'+'}${fmtN(Math.abs(otherFlows))}</b></div>
-      <div class="rec-row" style="border-top:1px solid var(--line)"><div><b>Neto vrednost na kraj</b></div><b>${fmt(endNW)}</b></div>
-      <div class="muted small" style="margin-top:6px">Štednja (${fmt(pNet)}) = prihodi − potrošnja. Neto vrednost se razlikuje od štednje za početno stanje i za transfere/keš/kredite (nisu „prava" potrošnja).</div>
-    </section>
-
-    <section class="card">
-      <h3>Trend potrošnje i štednje</h3>
-      <div class="chart-wrap"><canvas id="cTrend"></canvas></div>
-    </section>
-
-    <section class="card">
-      <div class="row-between"><h3>Rashodi po grupama · ${range.label}</h3></div>
-      <div class="chart-wrap small"><canvas id="cCat"></canvas></div>
-      <div class="cat-legend">
-        ${breakdown.map(c=>`<div class="cl" data-action="drill-group" data-group="${c.id}"><span class="dot" style="background:${c.color}"></span>${esc(c.icon)} ${esc(c.name)}<b>${fmt(c.total)}</b></div>`).join('')}
-      </div>
-      <div class="muted small">Dodirni grupu za potkategorije/transakcije →</div>
-    </section>
-
-    ${flows.length ? `<section class="card">
-      <div class="row-between"><h3>Ostali tokovi · ${range.label}</h3><small>transferi · keš · devize</small></div>
-      ${flows.map(c=>`<div class="rec-row" data-action="drill" data-cat="${c.id}"><div>${esc(c.icon)} ${esc(c.name)}</div><b>${fmt(c.total)}</b></div>`).join('')}
-      <div class="muted small" style="margin-top:6px">Dodirni za detalje (npr. Transfer drugima) →</div>
-    </section>`:''}
-
-    ${movers.length ? `<section class="card">
-      <h3>Najveće promene vs prethodni period</h3>
-      ${movers.map(x=>`<div class="rec-row" data-action="drill" data-cat="${x.cat.id||''}"><div>${esc(x.cat.icon)} ${esc(x.cat.name)}</div>
-        <b class="${x.delta>0?'neg':'pos'}">${x.delta>0?'▲':'▼'} ${fmtN(Math.abs(x.delta))}</b></div>`).join('')}
-    </section>`:''}
-
-    <section class="card">
-      <h3>Računi</h3>
-      ${balances.map(a=>`<div class="acct-row" data-action="acct" data-acct="${a.id}"><span class="dot" style="background:${a.color}"></span>
-        <div class="ar-name">${esc(a.name)}<small>${a.type==='cash'?'keš':'banka'} · ${a.n} tx</small></div>
-        <b class="${a.balance<0?'neg':''}">${fmt(a.balance,a.currency)}</b></div>`).join('')}
-    </section>
-
-    ${rec.length?`<section class="card">
-      <h3>Pretplate i redovni troškovi <small>~${fmt(recMonthly)}/mes</small></h3>
-      ${rec.slice(0,12).map(r=>`<div class="rec-row" data-action="merch" data-merch="${esc(r.merchant)}"><div>${esc(r.merchant)}<small>${r.months} meseci</small></div><b>${fmt(r.median)}</b></div>`).join('')}
-    </section>`:''}
+      <div class="rec-row total"><div><b>Na kraju perioda</b></div><b>${fmt(endNW)}</b></div>
+      <div class="muted small" style="margin-top:6px">Štednja = prihodi − potrošnja. Neto vrednost se od nje razlikuje za početno stanje i za transfere, keš i kredite (to nije „prava" potrošnja).</div>`, open)}
+    ${fold('trend','Trend potrošnje i štednje', `<div class="chart-wrap"><canvas id="cTrend" role="img" aria-label="Trend potrošnje i štednje"></canvas></div>`, open)}
+    ${flows.length ? fold('flows','Ostali tokovi', `
+      <div class="muted small">Transferi, keš, devize i glavnica kredita — ne računaju se u potrošnju.</div>
+      ${flows.map(c=>`<div class="rec-row" data-action="drill" data-cat="${c.id}"><div>${esc(c.icon)} ${esc(c.name)}</div><b>${fmt(c.total)}</b></div>`).join('')}`, open) : ''}
+    ${movers.length ? fold('movers','Najveće promene vs prethodni period', movers.map(x=>`<div class="rec-row" data-action="drill" data-cat="${x.cat.id||''}"><div>${esc(x.cat.icon)} ${esc(x.cat.name)}</div>
+        <b class="${x.delta>0?'neg':'pos'}">${x.delta>0?'▲':'▼'} ${fmtN(Math.abs(x.delta))}</b></div>`).join(''), open) : ''}
+    ${rec.length ? fold('rec','Pretplate i redovni računi', `
+      <div class="muted small">Isti trgovac, sličan iznos, bar 3 meseca.</div>
+      ${rec.slice(0,12).map(r=>`<div class="rec-row" data-action="merch" data-merch="${esc(r.merchant)}"><div>${esc(displayName(r.merchant))}<small>${cidx[r.category_id]?esc(cidx[r.category_id].icon+" "+cidx[r.category_id].name)+" · ":""}${r.months} meseci${r.count>r.months?` · ${r.count}×`:''}</small></div><b>${fmt(r.monthly)}/mes</b></div>`).join('')}`, open,
+      `<small>~${fmt(recMonthly)}/mes</small>`) : ''}
   `;
 
-  // charts
+  // charts — built only for open sections (and on first open), so a collapsed
+  // dashboard stays light and canvases never render at 0×0
   const C = window.Chart;
-  charts.ie = new C($('#cIE'), { type:'bar', data:{ labels:months, datasets:[
-    { label:'Prihodi', data:mw.map(x=>x.realIncome), backgroundColor:'#22c55e' },
-    { label:'Rashodi', data:mw.map(x=>x.spending), backgroundColor:'#ef4444' },
-  ]}, options: barOpts() });
-
-  charts.trend = new C($('#cTrend'), { type:'line', data:{ labels:months, datasets:[
-    { label:'Potrošnja', data:mw.map(x=>x.spending), borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,.1)', fill:true, tension:.3 },
-    { label:'Štednja', data:mw.map(x=>x.net), borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.1)', fill:true, tension:.3 },
-  ]}, options: barOpts() });
-
+  const builders = {
+    ie: () => charts.ie = new C($('#cIE'), { type:'bar', data:{ labels:months, datasets:[
+      { label:'Prihodi', data:mw.map(x=>x.realIncome), backgroundColor:C_INC, borderRadius:4 },
+      { label:'Rashodi', data:mw.map(x=>x.spending), backgroundColor:C_EXP, borderRadius:4 },
+    ]}, options: barOpts() }),
+    trend: () => charts.trend = new C($('#cTrend'), { type:'line', data:{ labels:months, datasets:[
+      { label:'Potrošnja', data:mw.map(x=>x.spending), borderColor:C_EXP, backgroundColor:'rgba(249,115,22,.1)', fill:true, tension:.3 },
+      { label:'Štednja', data:mw.map(x=>x.net), borderColor:C_SAVE, backgroundColor:'rgba(167,139,250,.1)', fill:true, tension:.3, borderDash:[5,4] },
+    ]}, options: barOpts() }),
+    nw: () => charts.nw = new C($('#cNW'), { type:'line', data:{ labels:nws.map(x=>x.label), datasets:[
+      { label:'Neto vrednost', data:nws.map(x=>x.net), borderColor:accent(), backgroundColor:'rgba(59,130,246,.12)', fill:true, tension:.3 },
+    ]}, options: barOpts() }),
+  };
   charts.cat = new C($('#cCat'), { type:'doughnut', data:{ labels:breakdown.map(c=>c.name),
-    datasets:[{ data:breakdown.map(c=>c.total), backgroundColor:breakdown.map(c=>c.color) }] },
-    options:{ plugins:{ legend:{display:false} }, cutout:'60%' } });
-
-  charts.nw = new C($('#cNW'), { type:'line', data:{ labels:nws.map(x=>x.label), datasets:[
-    { label:'Neto vrednost', data:nws.map(x=>x.net), borderColor:accent(), backgroundColor:'rgba(59,130,246,.12)', fill:true, tension:.3 },
-  ]}, options: barOpts() });
+    datasets:[{ data:breakdown.map(c=>c.total), backgroundColor:breakdown.map(c=>c.color), borderColor:getComputedStyle(document.body).getPropertyValue('--card').trim() }] },
+    options:{ maintainAspectRatio:false, plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:c=>`${c.label}: ${fmt(c.parsed)}` } } }, cutout:'60%' } });
+  s.querySelectorAll('details[data-fold]').forEach(d => {
+    const id = d.dataset.fold;
+    if(d.open && builders[id]) builders[id]();
+    d.addEventListener('toggle', () => {
+      if(d.open && builders[id] && !charts[id]?.canvas?.isConnected) builders[id]();
+      const st = dashOpen(); d.open ? st.add(id) : st.delete(id);
+      db.setSetting('dash_open', JSON.stringify([...st])); persist().catch(()=>{});
+    });
+  });
 
   $('#dpFrom',s)?.addEventListener('change', e=>{ dashPeriod.from = e.target.value||null; render(); });
   $('#dpTo',s)?.addEventListener('change', e=>{ dashPeriod.to = e.target.value||null; render(); });
@@ -402,10 +503,7 @@ function resolveDashPeriod(mAll){
   else if(p==='custom'){ from=dashPeriod.from||first; to=dashPeriod.to||last; if(from>to){ const t=from; from=to; to=t; } }
   if(from<first) from=first; if(to>last) to=last;
   const single = from===to;
-  const label = single ? an.fmtMonth(to)
-    : p==='all' ? 'sve vreme'
-    : p==='ytd' ? to.slice(0,4)+'.'
-    : `${an.fmtMonth(from)} – ${an.fmtMonth(to)}`;
+  const label = p==='all' ? `sve (${fmtRange(from,to)})` : fmtRange(from, to);
   return { from, to, months: dashMonthDiff(from,to)+1, single, label, preset:p };
 }
 // The equal-length window immediately before the selected one (for % comparisons).
@@ -451,16 +549,19 @@ function insights(P, breakdown, recMonthly, proj){
     else if(P.momSpend<-10) tips.push(`📉 Bravo — potrošnja je pala <b>${pct(P.momSpend)}</b> ${P.cmpLabel}.`);
   }
   if(P.top){ const share = P.spending>0 ? (P.top.total/P.spending*100) : 0;
-    tips.push(`🏆 Najveća kategorija (${P.label}): <b>${esc(P.top.icon+' '+P.top.name)}</b> — ${fmt(P.top.total)} (${share.toFixed(0)}% potrošnje).`); }
-  if(recMonthly>0) tips.push(`🔁 Redovni/pretplatni troškovi te koštaju oko <b>${fmt(recMonthly)}</b> mesečno (${fmt(recMonthly*12)} godišnje).`);
+    tips.push(`🏷️ Najviše trošiš na <b>${esc(P.top.icon+' '+P.top.name)}</b> — ${fmt(P.top.total)} (${share.toFixed(0)}% potrošnje).`); }
+  if(P.uncShare>=15) tips.push(`⚠️ <b>${P.uncShare.toFixed(0)}%</b> potrošnje nije razvrstano — uvidi ispod su zato nepotpuni. Razvrstaj ih gore ↑`);
+  if(recMonthly>0) tips.push(`🔁 Pretplate i redovni računi: oko <b>${fmt(recMonthly)}</b> mesečno (${fmt(recMonthly*12)} godišnje).`);
+  if(!tips.length) return '';
   return `<section class="card insights"><h3>💡 Uvidi</h3>${tips.map(t=>`<div class="tip">${t}</div>`).join('')}</section>`;
 }
 
 const kpi = (label,val,sub,cls,attrs='')=>`<div class="kpi ${cls}" ${attrs}><div class="kl">${label}</div><div class="kv">${val}</div><div class="ks">${sub}</div></div>`;
 function barOpts(){ return { responsive:true, maintainAspectRatio:false,
-  plugins:{ legend:{ labels:{ boxWidth:12, font:{size:11} } },
+  plugins:{ legend:{ labels:{ boxWidth:12, font:{size:12} } },
     tooltip:{ callbacks:{ label:c=>`${c.dataset.label}: ${fmtN(c.parsed.y)} RSD` } } },
-  scales:{ y:{ ticks:{ callback:v=>fmtN(v) } }, x:{ ticks:{ font:{size:10} } } } }; }
+  scales:{ y:{ ticks:{ font:{size:11}, callback:v=>HIDE ? '' : (Math.abs(v)>=1000 ? fmtN(v/1000)+'k' : fmtN(v)) } },
+    x:{ ticks:{ font:{size:11} }, grid:{ display:false } } } }; }
 
 // =================================================================== TRANSACTIONS
 const txFilter = { account:null, category:null, group:null, q:null, from:null, to:null, min:null, max:null, type:null };
@@ -509,51 +610,68 @@ function renderTx(s){
      FROM transactions ${whereSql}`, params);
   const sumIn = agg.inc, sumOut = agg.out, totalN = agg.n;
   const drill = (txFilter.group ? catMapById[txFilter.group] : null) || (txFilter.category ? catMapById[txFilter.category] : null);
+  const nFilters = activeFilterCount();
+  // keep the search box focused across re-renders while typing
+  const typing = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.filter==='q';
+
+  // group rows by day: "Danas" / "Juče" / "29. jun 2026"
+  let lastDay = null;
+  const list = rows.map(r=>{
+    const a=acctMap[r.account_id], c=catMapById[r.category_id]||{};
+    const head = r.date!==lastDay ? `<div class="day-h">${fmtDay(r.date)}</div>` : '';
+    lastDay = r.date;
+    const uncat = c.name === UNCAT;
+    return `${head}<div class="tx" data-action="edit-cat" data-txid="${r.id}" aria-label="${esc(displayName(r.merchant||r.description))}, ${r.amount<0?'rashod':'prihod'} ${esc(fmtN(Math.abs(r.amount)))} ${r.currency}, ${esc(c.name||'bez kategorije')}">
+      <div class="tx-ic" style="background:${(c.color||'#888')}22;color:${c.color||'#888'}" aria-hidden="true">${esc(c.icon||'•')}</div>
+      <div class="tx-main">
+        <div class="tx-t">${esc(displayName(r.merchant||r.description))}</div>
+        <div class="tx-s"><span class="tx-cat ${uncat?'uncat':''}">${uncat?'Razvrstaj':esc(c.name||'—')}</span> · ${esc(a?a.name:'')}</div>
+      </div>
+      <div class="tx-amt ${r.amount<0?'neg':'pos'}">${r.amount<0?'−':'+'}${fmtN(Math.abs(r.amount))}<small>${r.currency}</small></div>
+    </div>`;
+  }).join('');
 
   s.innerHTML = `
-    ${rows.length ? `<section class="card">
-      <div class="row-between"><h3>${drill?`${esc(drill.icon)} ${esc(drill.name)}`:'Kretanje po mesecima'}</h3>${activeFilterCount()?`<button class="ghost sm" data-action="clear-filters">✕ filteri</button>`:''}</div>
-      <div class="chart-wrap small"><canvas id="cFlt"></canvas></div>
-    </section>`:''}
     <div class="toolbar">
-      <select data-filter="month"><option value="">Svi meseci</option>${months.map(mm=>`<option value="${mm}" ${filterMonth===mm?'selected':''}>${an.fmtMonth(mm)}</option>`).join('')}</select>
-      <select data-filter="account"><option value="">Svi računi</option>${accounts.map(a=>`<option value="${a.id}" ${txFilter.account==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select>
-      <select data-filter="category"><option value="">Sve kategorije</option>${catSelectOptions(txFilter.category)}</select>
-      <input data-filter="q" placeholder="🔎 Traži…" value="${esc(txFilter.q||'')}" />
-      <button class="ghost filt-toggle" data-action="toggle-filters">⚙︎ Filteri${activeFilterCount()?` (${activeFilterCount()})`:''}</button>
+      <input type="search" data-filter="q" placeholder="Traži trgovca ili opis…" aria-label="Pretraga transakcija" value="${esc(txFilter.q||'')}" />
+      <select data-filter="month" aria-label="Mesec"><option value="">Svi meseci</option>${months.map(mm=>`<option value="${mm}" ${filterMonth===mm?'selected':''}>${fmtMonthLong(mm)}</option>`).join('')}</select>
+      <select data-filter="account" aria-label="Račun"><option value="">Svi računi</option>${accounts.map(a=>`<option value="${a.id}" ${txFilter.account==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select>
+      <select data-filter="category" aria-label="Kategorija"><option value="">Sve kategorije</option>${catSelectOptions(txFilter.category)}</select>
+      <button class="ghost filt-toggle ${nFilters?'on':''}" data-action="toggle-filters" aria-expanded="${showFilters}">Još filtera${nFilters?` · ${nFilters} aktivno`:''}</button>
     </div>
     ${showFilters?`<section class="card filters">
-      <div class="seg type-seg">
-        <button class="seg-b ${!txFilter.type?'active':''}" data-type="">Sve</button>
-        <button class="seg-b ${txFilter.type==='expense'?'active':''}" data-type="expense">Rashodi</button>
-        <button class="seg-b ${txFilter.type==='income'?'active':''}" data-type="income">Prihodi</button>
+      <div class="seg type-seg" role="group" aria-label="Vrsta">
+        <button class="seg-b ${!txFilter.type?'active':''}" data-type="" aria-pressed="${!txFilter.type}">Sve</button>
+        <button class="seg-b ${txFilter.type==='expense'?'active':''}" data-type="expense" aria-pressed="${txFilter.type==='expense'}">Rashodi</button>
+        <button class="seg-b ${txFilter.type==='income'?'active':''}" data-type="income" aria-pressed="${txFilter.type==='income'}">Prihodi</button>
       </div>
       <div class="form-row"><label class="fld">Od<input type="date" data-filter="from" value="${txFilter.from||''}"></label>
         <label class="fld">Do<input type="date" data-filter="to" value="${txFilter.to||''}"></label></div>
-      <div class="form-row"><label class="fld">Min iznos<input type="number" data-filter="min" value="${txFilter.min||''}"></label>
-        <label class="fld">Max iznos<input type="number" data-filter="max" value="${txFilter.max||''}"></label></div>
-      <button class="ghost" data-action="clear-filters">Očisti sve filtere</button>
+      <div class="form-row"><label class="fld">Min iznos<input type="number" inputmode="decimal" data-filter="min" value="${txFilter.min||''}"></label>
+        <label class="fld">Max iznos<input type="number" inputmode="decimal" data-filter="max" value="${txFilter.max||''}"></label></div>
+      <div class="form-row">
+        <button class="ghost" data-action="clear-filters">Očisti filtere</button>
+        ${nFilters && totalN>0 ? `<button class="del-tx" data-action="del-filtered">Obriši ovih ${totalN}</button>` : ''}
+      </div>
     </section>`:''}
-    <div class="tx-summary"><span>${totalN>rows.length?`${rows.length} od ${totalN}`:`${totalN} transakcija`}</span><span class="pos">+${fmtN(sumIn)}</span><span class="neg">−${fmtN(sumOut)}</span>${totalN>0?`<button class="ghost sm" data-action="del-filtered">🗑 ${totalN}</button>`:''}</div>
+    ${rows.length ? `<section class="card">
+      <div class="row-between"><h3>${drill?`${esc(drill.icon)} ${esc(drill.name)}`:'Po mesecima'}</h3>${nFilters?`<button class="ghost sm" data-action="clear-filters">✕ Očisti filtere</button>`:''}</div>
+      <div class="chart-wrap small"><canvas id="cFlt" role="img" aria-label="Prihodi i rashodi po mesecima za izabrane filtere"></canvas></div>
+    </section>`:''}
+    <div class="tx-summary" role="status"><span>${totalN>rows.length?`prikazano ${rows.length} od ${totalN}`:`${totalN} transakcija`}</span><span class="pos">+${fmtN(sumIn)}</span><span class="neg">−${fmtN(sumOut)}</span></div>
     <div class="tx-list">
-      ${rows.map(r=>{
-        const a=acctMap[r.account_id], c=catMapById[r.category_id]||{};
-        return `<div class="tx" data-action="edit-cat" data-txid="${r.id}">
-          <div class="tx-ic" style="background:${(c.color||'#888')}22;color:${c.color||'#888'}">${esc(c.icon||'•')}</div>
-          <div class="tx-main">
-            <div class="tx-t">${esc(r.merchant||r.description||'—')}</div>
-            <div class="tx-s">${r.date} · ${esc(a?a.name:'')} · <span class="tx-cat">${esc(c.name||'—')} ✎</span></div>
-          </div>
-          <div class="tx-amt ${r.amount<0?'neg':'pos'}">${r.amount<0?'−':'+'}${fmtN(Math.abs(r.amount))}<small>${r.currency}</small></div>
-        </div>`;
-      }).join('') || empty('🧾','Nema transakcija','Promeni filtere ili dodaj/uvezi podatke.')}
+      ${list || empty('🧾','Nema transakcija', nFilters?'Nijedna transakcija ne odgovara filterima.':'Uvezi izvod ili dodaj transakciju dugmetom +.')}
     </div>`;
 
-  s.querySelectorAll('[data-filter]').forEach(elm=> elm.addEventListener('change', e=>{
+  s.querySelectorAll('[data-filter]').forEach(elm=> { if(elm.dataset.filter==='q') return; elm.addEventListener('change', e=>{
     const f=e.target.dataset.filter, v=e.target.value;
     if(f==='month') filterMonth=v||null; else txFilter[f]=v||null; render();
-  }));
-  const q=$('[data-filter="q"]',s); if(q) q.addEventListener('input', debounce(e=>{ txFilter.q=e.target.value||null; render(); },300));
+  }); });
+  const q=$('[data-filter="q"]',s);
+  if(q){
+    q.addEventListener('input', debounce(e=>{ txFilter.q=e.target.value||null; render(); },300));
+    if(typing){ q.focus(); const n=q.value.length; try { q.setSelectionRange(n,n); } catch {} }
+  }
   s.querySelectorAll('[data-type]').forEach(b=> b.addEventListener('click', ()=>{ txFilter.type=b.dataset.type||null; render(); }));
 
   if(rows.length){
@@ -564,8 +682,8 @@ function renderTx(s){
       FROM transactions ${whereSql} GROUP BY m ORDER BY m`, params);
     charts.flt = new window.Chart($('#cFlt'), { type:'bar', data:{ labels:fm.map(r=>an.fmtMonth(r.m)),
       datasets:[
-        { label:'Rashodi', data:fm.map(r=>r.ex), backgroundColor:'#ef4444' },
-        { label:'Prihodi', data:fm.map(r=>r.inc), backgroundColor:'#22c55e' },
+        { label:'Prihodi', data:fm.map(r=>r.inc), backgroundColor:C_INC, borderRadius:4 },
+        { label:'Rashodi', data:fm.map(r=>r.ex), backgroundColor:C_EXP, borderRadius:4 },
       ]}, options: barOpts() });
   }
 }
@@ -574,34 +692,59 @@ function renderTx(s){
 function renderBudgets(s){
   const rate=rates();
   const m = an.monthly(rate);
-  if(!m.length){ s.innerHTML = empty('🎯','Još nema podataka','Uvezi ili dodaj transakcije pa postavi mesečne budžete.','Dodaj/Uvezi','tx'); return; }
+  if(!m.length){ s.innerHTML = empty('🎯','Još nema podataka','Uvezi ili dodaj transakcije pa postavi mesečne budžete.','Idi na uvoz','import'); return; }
   const monthsList = m.map(x=>x.month).reverse();
   const month = (budgetMonth && monthsList.includes(budgetMonth)) ? budgetMonth : monthsList[0];
   const status = an.budgetStatus(month, rate);
   const tree = repo.getCatTree();   // budgets are set on leaf subcategories
   const totalBudget = status.reduce((a,b)=>a+b.amount,0);
   const totalSpent = status.reduce((a,b)=>a+b.spent,0);
+  const avg = budgetAverages(rate);
   s.innerHTML = `
     <div class="toolbar2">
-      <select data-bmonth>${monthsList.map(mm=>`<option value="${mm}" ${mm===month?'selected':''}>${an.fmtMonth(mm)}</option>`).join('')}</select>
+      <select data-bmonth aria-label="Mesec">${monthsList.map(mm=>`<option value="${mm}" ${mm===month?'selected':''}>${fmtMonthLong(mm)}</option>`).join('')}</select>
     </div>
     ${status.length?`<section class="card">
-      <div class="row-between"><h3>Ukupno · ${an.fmtMonth(month)}</h3><b class="${totalSpent>totalBudget?'neg':''}">${fmt(totalSpent)} / ${fmt(totalBudget)}</b></div>
-      ${status.map(b=>`<div data-action="drill" data-cat="${b.category_id}" style="cursor:pointer">${budgetBar(b)}</div>`).join('')}
-    </section>`:`<div class="empty"><div class="ei">🎯</div><h3>Postavi prve budžete</h3><p>Unesi mesečni limit za kategorije ispod — pratićeš napredak i upozorenja.</p></div>`}
+      <div class="row-between"><h3>Ukupno · ${fmtMonthLong(month)}</h3><b class="${totalSpent>totalBudget?'neg':''}">${fmt(totalSpent)} / ${fmt(totalBudget)}</b></div>
+      ${status.map(b=>`<div data-action="drill" data-cat="${b.category_id}">${budgetBar(b)}</div>`).join('')}
+    </section>`:`<section class="card empty-card">
+      <h3>🎯 Postavi mesečne limite</h3>
+      <p class="muted small">Najbrže: predlog na osnovu tvoje prosečne potrošnje u poslednja 3 meseca (zaokruženo naviše). Posle ga menjaš po želji.</p>
+      <button class="primary big" data-action="budget-suggest">✨ Predloži budžete iz proseka</button>
+    </section>`}
     <section class="card">
-      <h3>Mesečni limiti po potkategoriji</h3>
-      <p class="muted small">Ostavi prazno da ukloniš budžet.</p>
-      ${tree.map(g=>{ const subs=g.subs.filter(c=>c.kind==='expense'); if(!subs.length) return '';
+      <div class="row-between"><h3>Limiti po kategoriji</h3>${status.length?`<button class="ghost sm" data-action="budget-suggest">✨ Popuni prazne</button>`:''}</div>
+      <p class="muted small">Mesečni iznos u RSD. Obriši broj da ukloniš limit. Sivo je tvoj prosek.</p>
+      ${tree.map(g=>{ const subs=g.subs.filter(c=>c.kind==='expense' && !an.EXCLUDE_SPENDING.includes(c.name)); if(!subs.length) return '';
         return `<div class="catgrp-h" style="margin-top:8px">${esc(g.icon+' '+g.name)}</div>`
           + subs.map(c=>{ const b=status.find(x=>x.category_id===c.id);
-            return `<div class="brow"><span>${esc(c.icon)} ${esc(c.name)}</span>
-              <input type="number" inputmode="numeric" class="binput" data-budget="${c.id}" placeholder="—" value="${b?Math.round(b.amount):''}"></div>`; }).join(''); }).join('')}
+            return `<label class="brow"><span>${esc(c.icon)} ${esc(c.name)}${avg[c.id]?`<small>Ø ${fmt(avg[c.id])}</small>`:''}</span>
+              <input type="number" inputmode="numeric" class="binput" data-budget="${c.id}" placeholder="bez limita" aria-label="Mesečni limit za ${esc(c.name)}" value="${b?Math.round(b.monthly):''}"></label>`; }).join(''); }).join('')}
     </section>`;
   $('[data-bmonth]',s)?.addEventListener('change', e=>{ budgetMonth=e.target.value; render(); });
   s.querySelectorAll('[data-budget]').forEach(inp=> inp.addEventListener('change', async e=>{
-    repo.setBudget(+e.target.dataset.budget, parseFloat(e.target.value)||0); await persist(); toast('Budžet sačuvan.'); render();
+    const y = window.scrollY;
+    repo.setBudget(+e.target.dataset.budget, parseFloat(e.target.value)||0); await persist();
+    render(); window.scrollTo(0, y); toast('Budžet sačuvan.');
   }));
+}
+// Average monthly spending per category over the last 3 complete months with data.
+function budgetAverages(rate){
+  const months = an.monthly(rate).map(x=>x.month).filter(mm => mm < todayISO().slice(0,7)).slice(-3);
+  if(!months.length) return {};
+  const out = {};
+  for(const r of an.categoryBreakdown({ from:months[0], to:months[months.length-1] }, 'expense', rate))
+    out[r.id] = r.total / months.length;
+  return out;
+}
+async function budgetSuggest(){
+  const avg = budgetAverages(rates());
+  const existing = new Set(db.all(`SELECT category_id FROM budgets`).map(r=>r.category_id));
+  const skip = new Set([...an.EXCLUDE_SPENDING, UNCAT]);
+  const cats = repo.getCategories().filter(c=>c.kind==='expense' && c.parent_id!=null && !skip.has(c.name) && !existing.has(c.id) && avg[c.id] >= 500);
+  if(!cats.length){ toast('Nema kategorija za predlog (potrebno je bar mesec dana podataka).', false); return; }
+  const roundUp = v => Math.ceil(v / 1000) * 1000;
+  await withUndo(`Predloženo ${cats.length} budžeta iz proseka.`, () => cats.forEach(c => repo.setBudget(c.id, roundUp(avg[c.id]))));
 }
 
 // =================================================================== IMPORT
@@ -702,7 +845,7 @@ function renderAccounts(s){
   s.innerHTML = `
     <section class="card"><div class="row-between"><h3>Neto vrednost</h3><b class="big-num">${fmt(nw.totalRSD)}</b></div>
       <div class="muted small" style="margin-top:8px">Kursna lista (preračun u RSD):</div>
-      ${used.map(c=>`<div class="brow"><span>1 ${c} =</span><input type="number" class="binput" data-rate="${c}" value="${getRate(c)}" step="0.1"> <span style="flex:none">RSD</span></div>`).join('')}
+      ${used.map(c=>`<div class="brow"><span>1 ${c} =</span><input type="number" inputmode="decimal" class="binput" data-rate="${c}" value="${getRate(c)}" step="0.1" aria-label="Kurs: 1 ${c} u dinarima"> <span style="flex:none">RSD</span></div>`).join('')}
     </section>
     ${balances.map(a=>{ const st=stMap[a.id]; return `<section class="card acct-card">
       <div class="row-between"><div><b>${esc(a.name)}</b><div class="muted">${a.type==='cash'?'💵 keš':'🏦 banka'} · ${a.currency} · ${a.n} transakcija</div></div>
@@ -718,9 +861,9 @@ function renderAccounts(s){
       <h3>Dodaj račun</h3>
       <input id="naName" placeholder="Naziv (npr. Banka 2 – tekući)" />
       <div class="form-row">
-        <select id="naType"><option value="bank">Banka</option><option value="cash">Keš</option></select>
-        <select id="naCur">${CURRENCIES.map(c=>`<option>${c}</option>`).join('')}</select>
-        <input id="naOpen" type="number" placeholder="Početno stanje" />
+        <select id="naType" aria-label="Vrsta računa"><option value="bank">Banka</option><option value="cash">Keš</option></select>
+        <select id="naCur" aria-label="Valuta">${CURRENCIES.map(c=>`<option>${c}</option>`).join('')}</select>
+        <input id="naOpen" type="number" inputmode="decimal" placeholder="Početno stanje" />
       </div>
       <button class="primary" data-action="add-account">Dodaj račun</button>
     </section>`;
@@ -733,114 +876,122 @@ function renderAccounts(s){
 const ACCENTS = ['#3b82f6','#22c55e','#8b5cf6','#f97316','#ec4899','#14b8a6'];
 function renderSettings(s){
   const cats = repo.getCategories();
-  const rules = db.all(`SELECT r.*, c.name AS cat, c.icon FROM rules r JOIN categories c ON c.id=r.category_id ORDER BY r.priority, r.match`);
+  const rules = db.all(`SELECT r.*, c.name AS cat, c.icon FROM rules r JOIN categories c ON c.id=r.category_id ORDER BY r.match`);
   const batches = repo.getImportBatches();
   const al = autolockMin();
   const cashN = repo.unmirroredCashCount();
   const lastBk = db.getSetting('last_backup', '');
   const bkDays = lastBk ? Math.floor((Date.now()-Date.parse(lastBk))/86400000) : null;
+  const th = theme();
+  const set = (id, title, body, extra='') => `<details class="card fold" data-set="${id}" ${settingsOpen.has(id)?'open':''}><summary><h3>${title}</h3>${extra}</summary>${body}</details>`;
   s.innerHTML = `
     <section class="card">
       <h3>💾 Rezervna kopija</h3>
-      <p class="muted small">Podaci postoje samo na ovom uređaju. Ako se browser/telefon obriše ili promeni, bez kopije su izgubljeni.
-        Kopija je <b>šifrovana tvojom lozinkom</b> — sačuvaj je npr. u Drive/iCloud; bez lozinke je neupotrebljiva.</p>
-      <div class="muted small">Poslednja kopija: <b class="${bkDays==null||bkDays>30?'neg':''}">${bkDays==null?'nikad':bkDays===0?'danas':`pre ${bkDays} dana`}</b>
-        ${persistentStorage===false?' · ⚠ browser nije odobrio trajno čuvanje — kopija je još važnija':''}</div>
-      <div class="form-row" style="margin-top:8px">
-        <button class="primary" data-action="backup-export">💾 Sačuvaj kopiju</button>
-        <button class="ghost" data-action="backup-import">📂 Vrati iz kopije</button>
+      <p class="muted small">Podaci postoje samo na ovom uređaju — ako se telefon ili browser obriše, bez kopije su izgubljeni.
+        Kopija je <b>šifrovana tvojom lozinkom</b>; čuvaj je npr. na Drive/iCloud.</p>
+      <div class="small">Poslednja kopija: <b class="${bkDays==null||bkDays>30?'neg':'pos'}">${bkDays==null?'nikad':bkDays===0?'danas':`pre ${bkDays} dana`}</b>
+        ${persistentStorage===false?'<div class="muted small">⚠ Browser nije odobrio trajno čuvanje — kopija je još važnija.</div>':''}</div>
+      <div class="form-row" style="margin-top:10px">
+        <button class="primary" data-action="backup-export">Sačuvaj kopiju</button>
+        <button class="ghost" data-action="backup-import">Vrati iz kopije</button>
       </div>
     </section>
+
     <section class="card">
-      <h3>📥 Uvoz izvoda</h3>
-      <p class="muted small">Uvezi PDF izvode (Banca Intesa). Duplikati se preskaču.</p>
+      <h3>📥 Uvoz i izvoz</h3>
       <button class="primary big" data-action="goto" data-view="import">Uvezi PDF izvod</button>
-    </section>
-    <section class="card">
-      <h3>Izvoz podataka</h3>
-      <div class="muted small">Opseg</div>
-      <select id="expScope">
-        <option value="all">Sve vreme</option>
-        ${dashRange && dashRange.preset!=='all' ? `<option value="period">Izabrani period (${esc(dashRange.label)})</option>` : ''}
-      </select>
-      <div class="form-row" style="margin-top:8px">
-        <button data-action="export-xlsx">📊 Excel (.xlsx)</button>
-        <button data-action="export-csv">📄 CSV</button>
+      <label class="fld" style="margin-top:12px">Izvoz u Excel/CSV — opseg
+        <select id="expScope">
+          <option value="all">Sve vreme</option>
+          ${dashRange && dashRange.preset!=='all' ? `<option value="period">Period sa Pregleda (${esc(dashRange.label)})</option>` : ''}
+        </select></label>
+      <div class="form-row">
+        <button data-action="export-xlsx">Excel (.xlsx)</button>
+        <button data-action="export-csv">CSV</button>
       </div>
     </section>
-    ${batches.length?`<section class="card">
-      <h3>Uvozi <small>${batches.length}</small></h3>
-      <p class="muted small">Obriši ceo uvoz odjednom (sve stavke iz tog fajla).</p>
-      <div class="rules">
-        ${batches.map(b=>{ const fn=b.batch.split('|')[1]||b.batch; const st=(b.batch.split('|')[0]||'').slice(0,16).replace('T',' ');
-          return `<div class="rule"><div style="flex:1;min-width:0">${esc(fn)}<small> ${b.mn}–${b.mx} · ${b.n} stavki${st?' · '+st:''}</small></div><span class="del" data-action="del-batch" data-batch="${esc(b.batch)}">🗑</span></div>`; }).join('')}
-      </div>
-    </section>`:''}
+
     <section class="card">
-      <h3>Kategorije <small>${cats.length}</small></h3>
-      <p class="muted small">Grupe i potkategorije. Dodirni za izmenu/brisanje; „＋ pot" dodaje potkategoriju u grupu.</p>
+      <h3>🔒 Sigurnost</h3>
+      <label class="fld">Zaključaj posle neaktivnosti
+        <select id="autolock">
+          ${[['0','Nikad'],['1','1 minut'],['5','5 minuta'],['15','15 minuta'],['30','30 minuta']].map(([v,l])=>`<option value="${v}" ${al==+v?'selected':''}>${l}</option>`).join('')}
+        </select></label>
+      <div class="muted small">Kad je uključeno, aplikacija se zaključava i ako je u pozadini duže od minuta.</div>
+      <details class="sub-fold"><summary>Promeni lozinku</summary>
+        <input type="password" id="np0" placeholder="Trenutna lozinka" aria-label="Trenutna lozinka" autocomplete="current-password" />
+        <input type="password" id="np1" placeholder="Nova lozinka (bar 6 znakova)" aria-label="Nova lozinka" autocomplete="new-password" />
+        <input type="password" id="np2" placeholder="Ponovi novu lozinku" aria-label="Ponovi novu lozinku" autocomplete="new-password" />
+        <button class="primary" data-action="change-pass" style="width:100%">Promeni lozinku</button>
+      </details>
+    </section>
+
+    <section class="card">
+      <h3>🎨 Izgled</h3>
+      <div class="muted small">Tema</div>
+      <div class="seg" role="group" aria-label="Tema">
+        ${[['auto','Kao sistem'],['dark','Tamna'],['light','Svetla']].map(([v,l])=>`<button class="seg-b ${th===v?'active':''}" data-action="set-theme" data-theme="${v}" aria-pressed="${th===v}">${l}</button>`).join('')}
+      </div>
+      <div class="muted small">Akcenat boja</div>
+      <div class="accent-row" role="group" aria-label="Akcenat boja">${ACCENTS.map((c,i)=>`<button class="accent-dot ${accent()===c?'sel':''}" data-action="set-accent" data-color="${c}" style="background:${c}" aria-label="Boja ${i+1}" aria-pressed="${accent()===c}"></button>`).join('')}</div>
+    </section>
+
+    <section class="card">
+      <h3>👛 Keš / Novčanik</h3>
+      <p class="muted small">Podizanja sa bankomata se pri uvozu prebacuju u keš račun „Novčanik", da pratiš keš na ruci i keš potrošnju.</p>
+      <label class="fld">Praćenje keša
+        <select id="mirrorToggle">
+          ${[['1','Uključeno'],['0','Isključeno']].map(([v,l])=>`<option value="${v}" ${db.getSetting('mirror_atm','0')===v?'selected':''}>${l}</option>`).join('')}
+        </select></label>
+      <button class="ghost" data-action="add-wallet-cash" style="width:100%">＋ Dodaj keš u Novčanik</button>
+      ${cashN>0?`<div class="muted small" style="margin-top:12px">${cashN} podizanja keša nisu u Novčaniku. Pošto taj keš nije praćen, možeš ga računati kao trošak:</div>
+      <button class="ghost" data-action="cash-as-expense" style="width:100%;margin-top:6px">Neevidentiran keš → trošak (${cashN})</button>`:''}
+    </section>
+
+    ${set('cats', `🏷️ Kategorije`, `
+      <p class="muted small">Dodirni kategoriju za izmenu. „＋" dodaje potkategoriju u grupu.</p>
       ${repo.getCatTree().map(g=>`<div class="catgrp">
         <div class="catgrp-h">
           <button class="catchip grp" data-action="edit-category" data-id="${g.id}" style="border-color:${g.color}">${esc(g.icon)} ${esc(g.name)}</button>
-          <button class="addsub" data-action="add-sub" data-id="${g.id}">＋ pot</button>
+          <button class="addsub" data-action="add-sub" data-id="${g.id}" aria-label="Dodaj potkategoriju u ${esc(g.name)}">＋</button>
         </div>
         <div class="cat-grid">${g.subs.map(c=>`<button class="catchip" data-action="edit-category" data-id="${c.id}" style="border-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('') || '<span class="muted small">—</span>'}</div>
       </div>`).join('')}
-      <button data-action="add-category" style="margin-top:8px">＋ Nova grupa</button>
-    </section>
-    <section class="card">
-      <h3>Pravila kategorizacije <small>${rules.length}</small></h3>
-      <p class="muted small">Ako opis/trgovac sadrži tekst → dodeli kategoriju.</p>
+      <button data-action="add-category" style="margin-top:8px;width:100%">＋ Nova grupa</button>`, `<small>${cats.length}</small>`)}
+
+    ${set('rules', `🧠 Pravila kategorizacije`, `
+      <p class="muted small">Ako naziv ili opis sadrži reč → dodeli kategoriju. Aplikacija uči i sama: kad promeniš kategoriju, zapamti trgovca (naučeno: <b>${repo.learnedCount()}</b>).</p>
+      <input id="rMatch" placeholder="Reč iz naziva, npr. LIDL" aria-label="Tekst pravila" />
       <div class="form-row">
-        <input id="rMatch" placeholder="Tekst (npr. LIDL)" />
-        <select id="rCat">${catSelectOptions()}</select>
-        <button class="primary" data-action="add-rule">Dodaj</button>
+        <select id="rCat" aria-label="Kategorija pravila">${catSelectOptions()}</select>
+        <button class="primary" data-action="add-rule" style="flex:0 0 auto">Dodaj</button>
       </div>
-      <button data-action="recat">↻ Primeni pravila i učenje na nekategorisane</button>
-      <div class="muted small" style="margin-top:8px">🧠 Pametna kategorizacija uči iz tvojih izmena. Naučeno trgovaca: <b>${repo.learnedCount()}</b>. Kad god ručno promeniš kategoriju, aplikacija je zapamti za ubuduće.</div>
+      <button data-action="recat" style="width:100%">↻ Primeni na nerazvrstane</button>
+      <input type="search" id="ruleQ" placeholder="Pretraži ${rules.length} pravila…" aria-label="Pretraga pravila" style="margin-top:12px" />
+      <div class="rules" id="ruleList">
+        ${rules.map(r=>`<div class="rule" data-q="${esc((r.match+' '+r.cat).toUpperCase())}"><code>${esc(r.match)}</code><span class="rule-c">→ ${esc(r.icon+' '+r.cat)}</span><button class="del" data-action="del-rule" data-id="${r.id}" aria-label="Obriši pravilo ${esc(r.match)}">✕</button></div>`).join('')}
+      </div>`, `<small>${rules.length}</small>`)}
+
+    ${batches.length ? set('batches', `📄 Uvezeni fajlovi`, `
+      <p class="muted small">Obriši ceo uvoz odjednom (sve stavke iz tog fajla).</p>
       <div class="rules">
-        ${rules.map(r=>`<div class="rule"><code>${esc(r.match)}</code> → ${esc(r.icon+' '+r.cat)} <span class="del" data-action="del-rule" data-id="${r.id}">✕</span></div>`).join('')}
-      </div>
-    </section>
-    <section class="card">
-      <h3>Izgled</h3>
-      <div class="muted small">Akcenat boja</div>
-      <div class="accent-row">${ACCENTS.map(c=>`<button class="accent-dot ${accent()===c?'sel':''}" data-action="set-accent" data-color="${c}" style="background:${c}"></button>`).join('')}</div>
-    </section>
-    <section class="card">
-      <h3>👛 Keš / Novčanik</h3>
-      <p class="muted small">Podizanja sa bankomata se pri uvozu automatski prebacuju u keš račun „Novčanik" (kao interni prenos), da možeš da pratiš keš na ruci i keš potrošnju.</p>
-      <select id="mirrorToggle">
-        ${[['1','Uključeno'],['0','Isključeno']].map(([v,l])=>`<option value="${v}" ${db.getSetting('mirror_atm','0')===v?'selected':''}>${l}</option>`).join('')}
-      </select>
-      <button class="ghost" data-action="add-wallet-cash" style="width:100%;margin-top:10px">＋ Dodaj keš u Novčanik</button>
-      ${cashN>0?`<div class="muted small" style="margin-top:12px">Imaš <b>${cashN}</b> podizanja keša koja nisu u Novčaniku. Pošto taj keš nije praćen, možeš ga označiti kao stvaran trošak:</div>
-      <button class="ghost" data-action="cash-as-expense" style="width:100%;margin-top:6px">💵 Neevidentiran keš → trošak (${cashN})</button>`:''}
-    </section>
-    <section class="card">
-      <h3>🔒 Sigurnost</h3>
-      <div class="muted small">Automatsko zaključavanje pri neaktivnosti</div>
-      <select id="autolock">
-        ${[['0','Isključeno'],['1','1 minut'],['5','5 minuta'],['15','15 minuta'],['30','30 minuta']].map(([v,l])=>`<option value="${v}" ${al==+v?'selected':''}>${l}</option>`).join('')}
-      </select>
-      <div class="muted small" style="margin-top:10px">Promena lozinke</div>
-      <input type="password" id="np0" placeholder="Trenutna lozinka" autocomplete="current-password" />
-      <input type="password" id="np1" placeholder="Nova lozinka" autocomplete="new-password" />
-      <input type="password" id="np2" placeholder="Ponovi novu lozinku" />
-      <button data-action="change-pass">Promeni lozinku</button>
-      <button class="ghost" data-action="lock">🔒 Zaključaj sada</button>
-    </section>
+        ${batches.map(b=>{ const fn=b.batch.split('|')[1]||b.batch;
+          return `<div class="rule"><div style="flex:1;min-width:0">${esc(fn)}<small style="display:block">${b.mn} – ${b.mx} · ${b.n} stavki</small></div><button class="del" data-action="del-batch" data-batch="${esc(b.batch)}" aria-label="Obriši uvoz ${esc(fn)}">🗑</button></div>`; }).join('')}
+      </div>`, `<small>${batches.length}</small>`) : ''}
+
     <section class="card danger">
       <h3>⚠️ Opasna zona</h3>
-      <p class="muted small">Trajno briše sve podatke (transakcije, račune, budžete, podešavanja) sa ovog uređaja. Preporuka: prvo izvezi backup (Excel).</p>
-      <button class="del-tx" data-action="wipe-all" style="width:100%">🗑 Obriši sve podatke</button>
+      <p class="muted small">Trajno briše sve podatke sa ovog uređaja. Prvo sačuvaj rezervnu kopiju.</p>
+      <button class="del-tx" data-action="wipe-all" style="width:100%">Obriši sve podatke</button>
     </section>
-    <section class="card muted small">
-      Moj Budžet · podaci su šifrovani (AES-256-GCM, PBKDF2 ${(600000).toLocaleString('sr-RS')} iteracija) i čuvaju se samo na ovom uređaju. Bez interneta i bez bankarske veze.
-    </section>`;
+    <p class="muted small about">Moj Budžet · AES-256-GCM, PBKDF2 ${(600000).toLocaleString('sr-RS')} iteracija · podaci samo na ovom uređaju, bez interneta i bez veze sa bankom.</p>`;
   $('#autolock',s)?.addEventListener('change', async e=>{ db.setSetting('autolock_min', +e.target.value); await persist(); resetAutoLock(); toast('Sačuvano.'); });
   $('#mirrorToggle',s)?.addEventListener('change', async e=>{ db.setSetting('mirror_atm', e.target.value); await persist(); toast(e.target.value==='1'?'Praćenje keša uključeno.':'Praćenje keša isključeno.'); });
+  $('#ruleQ',s)?.addEventListener('input', e=>{ const q=e.target.value.trim().toUpperCase();
+    s.querySelectorAll('#ruleList .rule').forEach(r=>{ r.hidden = q && !r.dataset.q.includes(q); }); });
+  s.querySelectorAll('details[data-set]').forEach(d=> d.addEventListener('toggle', ()=>{ d.open ? settingsOpen.add(d.dataset.set) : settingsOpen.delete(d.dataset.set); }));
 }
+const settingsOpen = new Set();   // which collapsible settings sections are open (this session)
 
 // =================================================================== EXPORT
 function exportRows(period){
@@ -878,11 +1029,23 @@ function exportCsv(period){
 }
 
 // =================================================================== MODALS
+// Bottom-sheet dialog: role=dialog, Escape/backdrop closes, focus moves in and
+// returns to the opener on close.
 function modal(html){
+  const opener = document.activeElement;
   const m = document.createElement('div'); m.className='modal-bg';
-  m.innerHTML = `<div class="modal">${html}</div>`;
-  m.addEventListener('click', e=>{ if(e.target===m) m.remove(); });
-  document.body.appendChild(m); return m;
+  m.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${html}</div>`;
+  const h = m.querySelector('h3'); if(h){ h.id = 'dlg-' + Date.now(); m.firstElementChild.setAttribute('aria-labelledby', h.id); }
+  const close = () => { m.remove(); };
+  m.addEventListener('click', e=>{ if(e.target===m) close(); });
+  m.addEventListener('keydown', e=>{ if(e.key==='Escape'){ e.stopPropagation(); close(); } });
+  // when removed (by any path), give focus back to what opened it
+  new MutationObserver((_, obs) => { if(!m.isConnected){ obs.disconnect(); try { opener && opener.isConnected && opener.focus(); } catch {} } })
+    .observe(document.body, { childList:true });
+  document.body.appendChild(m);
+  a11y(m);
+  setTimeout(() => { if(!m.contains(document.activeElement)){ const f = m.querySelector('input,select,button'); f && f.focus({ preventScroll:true }); } }, 30);
+  return m;
 }
 // In-app confirm (native confirm() is unreliable in installed/standalone PWAs).
 function confirmModal(message, okLabel='Obriši'){
@@ -894,54 +1057,64 @@ function confirmModal(message, okLabel='Obriši'){
     m.querySelector('[data-no]').onclick=()=>fin(false);
     m.querySelector('[data-yes]').onclick=()=>fin(true);
     m.addEventListener('click', e=>{ if(e.target===m) fin(false); });
+    new MutationObserver((_, obs)=>{ if(!m.isConnected){ obs.disconnect(); fin(false); } }).observe(document.body, { childList:true });
+    m.querySelector('[data-no]').focus();
   });
+}
+// Default account for a new entry: last one used, else the first RSD bank account.
+function defaultAccountId(accounts){
+  const last = +db.getSetting('last_acct', '0');
+  if(accounts.some(a=>a.id===last)) return last;
+  const rsdBank = accounts.find(a=>a.currency==='RSD' && a.type==='bank') || accounts.find(a=>a.currency==='RSD');
+  return (rsdBank || accounts[0] || {}).id;
 }
 function addManualModal(opts={}){
   const accounts = repo.getAccounts();
-  const cats = repo.getCategories();
+  if(!accounts.length){ toast('Prvo dodaj račun (Računi → Dodaj račun).', false); return; }
   const today = todayLocal();
   let kind = opts.kind || 'expense';
+  const accId0 = opts.accountId || defaultAccountId(accounts);
   const m = modal(`
     <h3>Nova transakcija</h3>
-    <div class="seg"><button class="seg-b ${kind==='expense'?'active':''}" data-kind="expense">Rashod</button><button class="seg-b ${kind==='income'?'active':''}" data-kind="income">Prihod</button></div>
-    <input id="mAmt" type="number" inputmode="decimal" placeholder="Iznos" />
-    <input id="mDesc" placeholder="Opis / trgovac" />
-    <label class="fld">Račun<select id="mAcc">${accounts.map(a=>`<option value="${a.id}" ${opts.accountId==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
+    <div class="seg" role="group" aria-label="Vrsta"><button class="seg-b ${kind==='expense'?'active':''}" data-kind="expense" aria-pressed="${kind==='expense'}">Rashod</button><button class="seg-b ${kind==='income'?'active':''}" data-kind="income" aria-pressed="${kind==='income'}">Prihod</button></div>
+    <label class="fld">Iznos<input id="mAmt" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0" /></label>
+    <label class="fld">Opis / trgovac<input id="mDesc" placeholder="npr. Pijaca" /></label>
+    <label class="fld">Kategorija<select id="mCat">${catSelectOptions(opts.categoryId, kind)}</select></label>
+    <label class="fld">Račun<select id="mAcc">${accounts.map(a=>`<option value="${a.id}" ${accId0==a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label>
     <div class="form-row">
       <label class="fld">Valuta<select id="mCur">${CURRENCIES.map(c=>`<option>${c}</option>`).join('')}</select></label>
-      <label class="fld">Datum (može i raniji)<input id="mDate" type="date" value="${today}" max="${today}" /></label>
+      <label class="fld">Datum<input id="mDate" type="date" value="${today}" max="${today}" /></label>
     </div>
-    <div class="muted small" id="mCurHint"></div>
-    <label class="fld">Kategorija<select id="mCat">${catSelectOptions(opts.categoryId, kind)}</select></label>
-    <div class="form-row"><button class="ghost" data-close>Otkaži</button><button class="primary" id="mSave">Sačuvaj</button></div>
+    <div class="muted small" id="mCurHint" aria-live="polite"></div>
+    <div class="form-row" style="margin-top:6px"><button class="ghost" data-close>Otkaži</button><button class="primary" id="mSave">Sačuvaj</button></div>
   `);
   // category list follows the selected kind (Rashod → rashodne, Prihod → prihodne)
-  m.querySelectorAll('.seg-b').forEach(b=> b.onclick=()=>{ kind=b.dataset.kind; m.querySelectorAll('.seg-b').forEach(x=>x.classList.toggle('active',x===b));
+  m.querySelectorAll('.seg-b').forEach(b=> b.onclick=()=>{ kind=b.dataset.kind;
+    m.querySelectorAll('.seg-b').forEach(x=>{ x.classList.toggle('active',x===b); x.setAttribute('aria-pressed', String(x===b)); });
     m.querySelector('#mCat').innerHTML = catSelectOptions(null, kind); });
   m.querySelector('[data-close]').onclick=()=>m.remove();
   const accSel=m.querySelector('#mAcc'), curSel=m.querySelector('#mCur'), hint=m.querySelector('#mCurHint');
-  // Currency follows the account; for the cash "slamarica" it's free to choose
+  // Currency follows the account; for cash accounts it's free to choose
   // (a different currency routes to that currency's own cash account).
   function syncCur(){
     const a = accounts.find(x=>x.id===+accSel.value);
     const cash = a && a.type==='cash';
-    curSel.value = a ? a.currency : 'RSD';   // default to the account's own currency
-    curSel.disabled = !cash;                 // cash: free to change; bank: fixed
+    curSel.value = a ? a.currency : 'RSD';
+    curSel.disabled = !cash;
     onCur();
   }
   function onCur(){
     const a = accounts.find(x=>x.id===+accSel.value);
-    if(a && a.type==='cash' && curSel.value!==a.currency)
-      hint.textContent = `Ide u keš „${curSel.value}" (kreira se ako ne postoji).`;
+    if(a && a.type==='cash' && curSel.value!==a.currency) hint.textContent = `Ide u keš „${curSel.value}" (kreira se ako ne postoji).`;
+    else if(a && a.type!=='cash') hint.textContent = `Valuta prati račun (${a.currency}).`;
     else hint.textContent = '';
   }
   syncCur(); accSel.onchange=syncCur; curSel.onchange=onCur;
-  m.querySelector('#mSave').onclick = async ()=>{
+  const save = async ()=>{
     const amount = parseFloat(m.querySelector('#mAmt').value);
-    if(!(amount>0)){ m.querySelector('#mAmt').focus(); return; }
+    if(!(amount>0)){ toast('Unesi iznos veći od nule.', false); m.querySelector('#mAmt').focus(); return; }
     const date = m.querySelector('#mDate').value;
     if(!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > todayLocal()){ toast('Unesi ispravan datum (ne u budućnosti).', false); m.querySelector('#mDate').focus(); return; }
-    if(!accSel.value){ toast('Prvo dodaj račun.', false); return; }
     let accId = +accSel.value;
     const acc = accounts.find(a=>a.id===accId);
     if(acc && acc.type==='cash' && curSel.value!==acc.currency) accId = repo.findOrCreateCashAccount(curSel.value).id;
@@ -949,23 +1122,75 @@ function addManualModal(opts={}){
       repo.addManual({ account_id:accId, date, amount, kind,
         category_id:+m.querySelector('#mCat').value || null, description:m.querySelector('#mDesc').value });
     } catch { toast('Transakcija nije sačuvana — proveri unos.', false); return; }
+    db.setSetting('last_acct', +accSel.value);
     await persist(); m.remove(); toast('Transakcija dodata.'); render();
   };
+  m.querySelector('#mSave').onclick = save;
+  m.querySelectorAll('input').forEach(i => i.addEventListener('keydown', e => { if(e.key==='Enter') save(); }));
   m.querySelector('#mAmt').focus();
 }
+// Category picker grid, limited to kinds that fit the amount's sign.
+function catPicker(isCredit, currentId, exclude=[]){
+  const ok = c => (isCredit ? c.kind!=='expense' : c.kind!=='income') && !exclude.includes(c.name);
+  return `<div class="cat-tree">${repo.getCatTree().map(g=>{ const subs=g.subs.filter(ok); if(!subs.length) return '';
+    return `<div class="ctg-h">${esc(g.icon+' '+g.name)}</div><div class="cat-pick">`
+      + subs.map(c=>`<button class="catp ${c.id===currentId?'cur':''}" data-cat="${c.id}" style="border-left-color:${c.color}" ${c.id===currentId?'aria-current="true"':''}>${esc(c.icon)} ${esc(c.name)}</button>`).join('')
+      + `</div>`; }).join('')}</div>`;
+}
+function txSummaryHtml(tx){
+  const a = db.get(`SELECT name FROM accounts WHERE id=?`, [tx.account_id]);
+  return `<div class="tx-card">
+    <div class="tx-card-t">${esc(displayName(tx.merchant||tx.description))}</div>
+    <div class="tx-card-a ${tx.amount<0?'neg':'pos'}">${tx.amount<0?'−':'+'}${fmt(Math.abs(tx.amount), tx.currency)}</div>
+    <div class="muted small">${fmtDay(tx.date)} · ${esc(a?a.name:'')}</div>
+    ${tx.description && tx.description!==tx.merchant ? `<div class="muted small tx-card-d">${esc(tx.description)}</div>` : ''}
+  </div>`;
+}
 function editCatModal(txId){
-  const cats = repo.getCategories();
-  const tx = db.get(`SELECT * FROM transactions WHERE id=?`,[txId]);
-  const m = modal(`<h3>Kategorija</h3><div class="muted">${esc(tx.merchant||tx.description||'')}</div>
-    <div class="cat-tree">${repo.getCatTree().map(g=>
-      `<div class="ctg-h">${esc(g.icon+' '+g.name)}</div><div class="cat-pick">`
-      + g.subs.map(c=>`<button class="catp" data-cat="${c.id}" style="border-color:${c.color}">${esc(c.icon)} ${esc(c.name)}</button>`).join('')
-      + `</div>`).join('')}</div>
+  const tx = db.get(`SELECT * FROM transactions WHERE id=?`,[txId]); if(!tx) return;
+  const m = modal(`<h3>Izmeni kategoriju</h3>${txSummaryHtml(tx)}
+    ${catPicker(tx.amount>=0, tx.category_id)}
     <div class="form-row"><button class="ghost" data-close>Zatvori</button>
-    <button class="del-tx" data-action="del-tx" data-id="${txId}">🗑 Obriši transakciju</button></div>`);
+    <button class="del-tx" data-id="${txId}">Obriši transakciju</button></div>`);
   m.querySelector('[data-close]').onclick=()=>m.remove();
-  m.querySelectorAll('.catp').forEach(b=> b.onclick = async ()=>{ repo.setCategory(txId, +b.dataset.cat); await persist(); m.remove(); toast('Kategorija promenjena.'); render(); });
-  m.querySelector('.del-tx').onclick = async ()=>{ if(await confirmModal('Obrisati transakciju?')){ repo.deleteTransaction(txId); await persist(); m.remove(); toast('Transakcija obrisana.'); render(); } };
+  m.querySelectorAll('.catp').forEach(b=> b.onclick = async ()=>{ repo.setCategory(txId, +b.dataset.cat); await persist(); m.remove(); toast('Kategorija promenjena — zapamćeno za ovog trgovca.'); render(); });
+  m.querySelector('.del-tx').onclick = async ()=>{ m.remove(); await withUndo('Transakcija obrisana.', () => repo.deleteTransaction(txId)); };
+}
+// Triage: go through uncategorized debits one merchant at a time. Each choice is
+// learned and immediately applied to the same merchant's other rows.
+function triageModal(){
+  const skipped = [];
+  let sortedTotal = 0;
+  const m = modal(`<h3>Razvrstavanje</h3><div id="trBody"></div>`);
+  const body = m.querySelector('#trBody');
+  const show = (note='') => {
+    const left = repo.uncategorizedCount();
+    const tx = repo.nextUncategorized(skipped);
+    if(!tx){
+      body.innerHTML = `<div class="empty" style="padding:24px 8px"><div class="ei">🎉</div><h3>${left?'Preskočeno je ostalo':'Sve je razvrstano'}</h3>
+        <p>${sortedTotal?`Razvrstano ${sortedTotal} transakcija.`:''}${left?` ${left} preskočenih možeš razvrstati kasnije.`:''}</p></div>
+        <button class="primary big" data-close>Gotovo</button>`;
+      body.querySelector('[data-close]').onclick = () => m.remove();
+      body.querySelector('[data-close]').focus();
+      return;
+    }
+    body.innerHTML = `<div class="muted small" aria-live="polite">${left} preostalo${tx.same>1?` · ovaj trgovac: ${tx.same} stavki`:''}${note?` · <span class="pos">${note}</span>`:''}</div>
+      ${txSummaryHtml(tx)}
+      ${catPicker(false, null, [UNCAT])}
+      <div class="form-row"><button class="ghost" data-close>Zatvori</button><button data-skip>Preskoči</button></div>`;
+    body.querySelector('[data-close]').onclick = () => m.remove();
+    body.querySelector('[data-skip]').onclick = () => { skipped.push(tx.id); show(); };
+    body.querySelectorAll('.catp').forEach(b => b.onclick = async () => {
+      const others = repo.triageAssign(tx.id, +b.dataset.cat);
+      sortedTotal += 1 + others;
+      await persist();
+      show(others ? `+${others} istog trgovca razvrstano automatski` : '✓ sačuvano');
+    });
+    a11y(body);
+    const first = body.querySelector('.catp'); first && first.focus({ preventScroll:true });
+  };
+  new MutationObserver((_, obs)=>{ if(!m.isConnected){ obs.disconnect(); if(sortedTotal) render(); } }).observe(document.body, { childList:true });
+  show();
 }
 
 // FAB quick-action sheet
@@ -1006,7 +1231,8 @@ function categoryEditModal(id){
     await persist(); m.remove(); toast('Kategorija sačuvana.'); render(); };
   const del=m.querySelector('#ceDel');
   if(del) del.onclick=async()=>{ if(await confirmModal('Obrisati kategoriju? Njene transakcije se premeštaju u „Ostalo / Nekategorisano".')){
-    if(repo.deleteCategory(id)){ await persist(); m.remove(); toast('Kategorija obrisana.'); render(); } else toast('Ova kategorija se ne može obrisati.',false); } };
+    if(repo.isProtectedCategory(id)){ toast('Ova kategorija se ne može obrisati.',false); return; }
+    m.remove(); await withUndo('Kategorija obrisana.', () => repo.deleteCategory(id)); } };
 }
 function categoryAddModal(parentId){
   const m = modal(`<h3>Nova ${parentId?'potkategorija':'kategorija'}</h3>
@@ -1044,8 +1270,8 @@ function accountEditModal(id){
     const ob = parseFloat(m.querySelector('#aeOpen').value);
     if(Number.isFinite(ob)) fields.opening_balance = ob;
     repo.updateAccount(id, fields); await persist(); m.remove(); toast('Račun sačuvan.'); render(); };
-  m.querySelector('#aeDel').onclick=async()=>{ if(await confirmModal(`Obrisati račun „${a.name}"${n>0?` i njegovih ${n} transakcija`:''}? Ovo se ne može poništiti.`)){
-    repo.deleteAccount(id); await persist(); m.remove(); toast('Račun obrisan.'); render(); } };
+  m.querySelector('#aeDel').onclick=async()=>{ if(await confirmModal(`Obrisati račun „${a.name}"${n>0?` i njegovih ${n} transakcija`:''}? `)){
+    m.remove(); await withUndo('Račun obrisan.', () => repo.deleteAccount(id)); } };
 }
 
 // SQL condition (+params) on t.date for a period: 'YYYY-MM', {from,to} or null.
@@ -1249,14 +1475,18 @@ function doUpdate(){ userTriggeredUpdate=true; if(swReg && swReg.waiting) swReg.
 // =================================================================== EVENTS
 async function onClick(e){
   resetAutoLock();
-  const tabBtn = e.target.closest('.tab'); if(tabBtn){ view=tabBtn.dataset.tab; render(); return; }
+  const tabBtn = e.target.closest('.tab'); if(tabBtn){ view=tabBtn.dataset.tab; render(); window.scrollTo(0,0); return; }
   const a = e.target.closest('[data-action]'); if(!a) return;
   const act = a.dataset.action;
   if(act==='lock'){ lockNow(); }
   else if(act==='goto'){ view=a.dataset.view; render(); }
   else if(act==='fab'){ fabSheet(); }
   else if(act==='edit-cat'){ editCatModal(+a.dataset.txid); }
-  else if(act==='toggle-hide'){ db.setSetting('hide_amounts', hideAmounts()?'0':'1'); await persist(); applyPrefs(); const btn=$('[data-action="toggle-hide"]'); if(btn) btn.textContent=hideAmounts()?'🙈':'👁️'; }
+  else if(act==='toggle-hide'){ db.setSetting('hide_amounts', hideAmounts()?'0':'1'); await persist(); applyPrefs();
+    a.innerHTML = HIDE?ICON.eyeOff:ICON.eye; a.setAttribute('aria-pressed', String(HIDE)); a.setAttribute('aria-label', HIDE?'Prikaži iznose':'Sakrij iznose');
+    render(); toast(HIDE?'Iznosi su sakriveni.':'Iznosi su vidljivi.'); }
+  else if(act==='triage'){ triageModal(); }
+  else if(act==='budget-suggest'){ await budgetSuggest(); }
   else if(act==='drill'){ if(a.dataset.cat){ clearFilters(); applyDashPeriod(); txFilter.category=+a.dataset.cat; view='tx'; render(); } }
   else if(act==='drill-group'){ if(a.dataset.group){ clearFilters(); applyDashPeriod(); txFilter.group=+a.dataset.group; view='tx'; render(); } }
   else if(act==='dash-period'){ dashPeriod.preset=a.dataset.preset; if(a.dataset.preset!=='custom'){ dashPeriod.from=null; dashPeriod.to=null; } render(); }
@@ -1272,15 +1502,15 @@ async function onClick(e){
   else if(act==='del-filtered'){
     const { whereSql, params } = buildTxWhere();
     const n = repo.countWhere(whereSql, params);
-    if(n>0 && await confirmModal(`Obrisati ${n} prikazanih transakcija? Ovo se ne može poništiti.`, `Obriši ${n}`)){
-      repo.deleteWhere(whereSql, params); await persist(); toast(`Obrisano ${n} transakcija.`); render();
+    if(n>0 && await confirmModal(`Obrisati ${n} transakcija koje odgovaraju filterima?`, `Obriši ${n}`)){
+      await withUndo(`Obrisano ${n} transakcija.`, () => repo.deleteWhere(whereSql, params));
     }
   }
   else if(act==='del-batch'){
     const batch = a.dataset.batch; const fn = (batch.split('|')[1]||batch);
     const n = repo.countWhere('WHERE import_batch=?', [batch]);
-    if(await confirmModal(`Obrisati ceo uvoz „${fn}" (${n} stavki)? Ovo se ne može poništiti.`, `Obriši ${n}`)){
-      repo.deleteByBatch(batch); await persist(); toast(`Uvoz obrisan (${n}).`); render();
+    if(await confirmModal(`Obrisati ceo uvoz „${fn}" (${n} stavki)?`, `Obriši ${n}`)){
+      await withUndo(`Uvoz obrisan (${n}).`, () => repo.deleteByBatch(batch));
     }
   }
   else if(act==='toggle-filters'){ showFilters=!showFilters; render(); }
@@ -1289,6 +1519,7 @@ async function onClick(e){
   else if(act==='add-category'){ categoryAddModal(); }
   else if(act==='add-sub'){ categoryAddModal(+a.dataset.id); }
   else if(act==='set-accent'){ db.setSetting('accent', a.dataset.color); await persist(); applyPrefs(); render(); }
+  else if(act==='set-theme'){ db.setSetting('theme', a.dataset.theme); await persist(); applyPrefs(); render(); }
   else if(act==='do-update'){ doUpdate(); }
   else if(act==='confirm-import'){ a.disabled=true; a.textContent='Uvozim…'; await confirmImport(); }
   else if(act==='add-account'){
@@ -1300,7 +1531,7 @@ async function onClick(e){
     const mt=$('#rMatch').value.trim(); if(!mt) return;
     repo.addRule(mt, +$('#rCat').value, 3); await persist(); toast('Pravilo dodato.'); render();
   }
-  else if(act==='del-rule'){ repo.deleteRule(+a.dataset.id); await persist(); render(); }
+  else if(act==='del-rule'){ await withUndo('Pravilo obrisano.', () => repo.deleteRule(+a.dataset.id)); }
   else if(act==='recat'){ const n=repo.recategorizeAll(true); await persist(); toast(`Ažurirano ${n} transakcija.`); render(); }
   else if(act==='add-wallet-cash'){ const w=repo.findOrCreateWallet('RSD'); await persist(); addManualModal({ accountId:w.id, kind:'income' }); }
   else if(act==='cash-as-expense'){

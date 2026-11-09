@@ -260,6 +260,27 @@ export function learnFromTx(txId, catId){
           ON CONFLICT(key) DO UPDATE SET category_id=?, n=n+1`, [k, catId, catId]);
 }
 export const learnedCount = () => db.get(`SELECT COUNT(*) AS c FROM learned`).c;
+// Debits still in "Ostalo / Nekategorisano" — the triage queue.
+export function uncategorizedCount(){
+  const u = catMap()['Ostalo / Nekategorisano']; if(u == null) return 0;
+  return db.get(`SELECT COUNT(*) AS c FROM transactions WHERE category_id=? AND amount<0`, [u]).c;
+}
+// Next item to triage: the merchant with the most uncategorized debits first (one
+// decision then sorts the most rows), newest row of that merchant.
+export function nextUncategorized(skip=[]){
+  const u = catMap()['Ostalo / Nekategorisano']; if(u == null) return null;
+  const ph = skip.length ? `AND id NOT IN (${skip.map(()=>'?').join(',')})` : '';
+  return db.get(`SELECT t.*, (SELECT COUNT(*) FROM transactions x WHERE x.category_id=t.category_id AND x.amount<0
+      AND COALESCE(x.merchant,'')=COALESCE(t.merchant,'')) AS same
+    FROM transactions t WHERE category_id=? AND amount<0 ${ph}
+    ORDER BY same DESC, date DESC, id DESC LIMIT 1`, [u, ...skip]);
+}
+// Assign a category from triage: teach it, then let the learned memory sort every
+// other uncategorized row of the same merchant. Returns how many others were sorted.
+export function triageAssign(txId, catId){
+  setCategory(txId, catId);
+  return recategorizeAll(true);
+}
 // How many "Podizanje keša" debits are NOT mirrored into a Novčanik (i.e. untracked cash)?
 export function unmirroredCashCount(){
   const podz = catMap()['Podizanje keša']; if(!podz) return 0;

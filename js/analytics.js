@@ -94,24 +94,35 @@ export function netWorth(rates){
   return { totalRSD: total, accounts: parts };
 }
 
-// Recurring charges: same merchant in >= 3 distinct months. Estimated monthly cost (RSD).
+// Recurring charges (subscriptions, bills): same merchant in >= 3 distinct months
+// with a STABLE amount. Transfers to people, cash withdrawals, FX and loan
+// principal are not subscriptions and are excluded. Estimated monthly cost (RSD).
 export function recurring(rates, range){
   const { cond, params } = monthCond(range);
+  const ex = excludedIds(EXCLUDE_SPENDING);
   const rows = db.all(
-    `SELECT merchant, substr(date,1,7) AS m, ABS(amount) AS amt, currency
-     FROM transactions WHERE amount<0 AND merchant IS NOT NULL AND merchant<>'' ${cond?'AND '+cond:''}`, params);
+    `SELECT merchant, substr(date,1,7) AS m, ABS(amount) AS amt, currency, category_id
+     FROM transactions WHERE amount<0 AND merchant IS NOT NULL AND merchant<>''
+     ${ex.length?`AND (category_id IS NULL OR category_id NOT IN (${ex.join(',')}))`:''}
+     ${cond?'AND '+cond:''}`, params);
   const byMerch = {};
   for(const r of rows){
     const amt = toRSD(r.amt, r.currency, rates);
     const o = byMerch[r.merchant] || (byMerch[r.merchant] = { merchant:r.merchant, months:new Set(), amts:[] });
-    o.months.add(r.m); o.amts.push(amt);
+    o.months.add(r.m); o.amts.push(amt); (o.cats || (o.cats={}))[r.category_id] = ((o.cats||{})[r.category_id]||0)+1;
   }
   const list = [];
   for(const o of Object.values(byMerch)){
     if(o.months.size >= 3){
       const avg = o.amts.reduce((s,x)=>s+x,0)/o.amts.length;
       const sorted=[...o.amts].sort((a,b)=>a-b); const med = sorted[Math.floor(sorted.length/2)];
-      list.push({ merchant:o.merchant, months:o.months.size, count:o.amts.length, avg, median:med });
+      // stable price: most charges within ±25% of the median (a subscription/bill,
+      // not a shop you visit often with varying baskets)
+      const near = o.amts.filter(x => Math.abs(x-med) <= med*0.25).length;
+      if(med > 0 && near/o.amts.length >= 0.6)
+        list.push({ merchant:o.merchant, months:o.months.size, count:o.amts.length, avg, median:med,
+          monthly: med * o.amts.length / o.months.size,
+          category_id: +Object.entries(o.cats||{}).sort((a,b)=>b[1]-a[1])[0]?.[0] || null });   // e.g. charged twice a month
     }
   }
   return list.sort((a,b)=>b.median-a.median);
