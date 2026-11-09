@@ -270,6 +270,10 @@ function enterApp(){
     const n = repo.fixCompanyTransfers(); db.setSetting('fix_company_transfers','0'); persist().catch(()=>{});
     if(n) setTimeout(()=>toast(`${n} plaćanja firmama prebačeno iz „Transfer drugima" u potrošnju.`), 1400);
   }
+  // one-time (v13): bind "person → pass-through / exchange" memories to their amounts
+  if(db.getSetting('bind_learned')==='1'){
+    repo.bindLearnedAmounts(); db.setSetting('bind_learned','0'); persist().catch(()=>{});
+  }
   // ask the browser to keep our data (no eviction on low storage / inactivity)
   db.requestPersistence().then(ok=>{ persistentStorage = ok; });
   resetAutoLock();
@@ -410,7 +414,7 @@ function renderDashboard(s){
       ${kpi('Priliv', fmt(P.realIncome), 'po kategorijama', '', 'data-action="kpi-income"')}
       ${kpi('Potrošnja', fmt(P.spending), pBig>0 ? `redovno ${fmtN(pRegular)} · jednokratno ${fmtN(pBig)}` : (P.momSpend==null?'po kategorijama':`${P.momSpend<=0?'▼':'▲'} ${pct(P.momSpend)} ${cmpLabel}`), P.momSpend>10?'bad':'', 'data-action="kpi-spend"')}
       ${kpi('Ostalo ti je', fmt(P.net), P.savingsRate==null?'prihodi − svi odlivi':`stopa štednje ${P.savingsRate.toFixed(0)}%`, P.net>=0?'good':'bad', 'data-action="kpi-save"')}
-      ${range.single ? '' : kpi('Redovno mesečno', fmt(P.regularAvg), `potrošnja bez jednokratnih · ${monthsData} mes.`, '', 'data-action="kpi-avg"')}
+      ${range.single ? '' : kpi('Redovno mesečno', fmt(P.regularAvg), `sa povremenim (servis…), bez jednokratnih · ${monthsData} mes.`, '', 'data-action="kpi-avg"')}
     </div>
 
     ${uncN ? `<section class="card uncat" data-action="triage">
@@ -503,6 +507,7 @@ function flowCard(f, months, cidx){
   const catId = (name) => (Object.values(cidx).find(c=>c.name===name) || {}).id || '';
   const rows = [
     { k:'regular', label:'Redovna potrošnja', sub:'hrana, gorivo, računi, kupovina…', v:f.regular, color:C_EXP, attrs:'data-action="kpi-spend"' },
+    { k:'periodic', label:'Povremeni veliki troškovi', sub:(f.funds||[]).map(p=>p.cat.name).join(', ')+' · ponavljaju se', v:f.periodic, color:'#fb923c', attrs:'' },
     { k:'big', label:'Veliki jednokratni izdaci', sub:`pojedinačno od ${fmt(bigThreshold())}`, v:f.oneOffs, color:C_BIG, attrs:'' },
     { k:'cash', label:'Keš sa bankomata', sub:'ne zna se na šta je potrošen', v:f.cash, color:'#94a3b8', attrs:`data-action="drill" data-cat="${catId('Podizanje keša')}"` },
     { k:'people', label:'Prenosi ljudima', sub:'neto: poslato − primljeno', v:f.people, color:'#f59e0b', attrs:`data-action="drill" data-cat="${catId('Transfer drugima')}"` },
@@ -517,7 +522,7 @@ function flowCard(f, months, cidx){
     <div class="flow-bar in" aria-hidden="true"><span style="width:${(f.income/scale*100).toFixed(2)}%;background:${C_INC}"></span></div>
     ${rows.map(r=>`<div class="rec-row" ${r.attrs}><span class="dot" style="background:${r.color}"></span><div>${r.label}<small>${r.sub}</small></div>
       <div class="flow-v"><b>${fmt(r.v)}</b>${per(r.v)}</div></div>
-      ${r.k==='big' ? f.bigList.slice(0,4).map(t=>`<div class="rec-row sub" data-action="edit-cat" data-txid="${t.id}"><div>${esc(displayName(t.merchant||t.description))}<small>${fmtDay(t.date)} · ${esc(t.cat?t.cat.name:'—')}</small></div><b>${fmt(t.v)}</b></div>`).join('') : ''}`).join('')}
+      ${r.k==='big' || r.k==='periodic' ? (r.k==='big' ? f.bigList : f.periodicList).slice(0,4).map(t=>`<div class="rec-row sub" data-action="edit-cat" data-txid="${t.id}"><div>${esc(displayName(t.merchant||t.description))}<small>${fmtDay(t.date)} · ${esc(t.cat?t.cat.name:'—')}</small></div><b>${fmt(t.v)}</b></div>`).join('') : ''}`).join('')}
     <div class="rec-row total"><span class="dot" style="background:${C_INC}"></span><div>Prilivi<small>plata i ostali prihodi</small></div><div class="flow-v"><b class="pos">${fmt(f.income)}</b>${per(f.income)}</div></div>
     <div class="rec-row"><div><b>${f.left>=0?'Ostalo ti je':'Potrošeno više nego što je ušlo'}</b></div><div class="flow-v"><b class="${f.left>=0?'pos':'neg'}">${f.left>=0?'+':'−'}${fmtN(Math.abs(f.left))}</b>${per(Math.abs(f.left))}</div></div>
     <div class="muted small" style="margin-top:6px">Ne računa se novac koji samo prolazi: između tvojih računa, menjačnica, „Prolazni novac".</div>
@@ -533,6 +538,7 @@ function ideasCard(ideas){
     ${cuts.length ? `<div class="muted small">Ako „želje" smanjiš za 30%:</div>` : ''}
     ${cuts.map(i=>`<div class="rec-row" data-action="drill" data-cat="${i.cat.id}"><div>${esc(i.cat.icon)} ${esc(i.cat.name)}<small>sada ~${fmt(i.monthly)} mesečno</small></div>
       <div class="flow-v"><b class="pos">−${fmt(i.save)}</b><small>${fmt(i.save*12)} godišnje</small></div></div>`).join('')}
+    ${ideas.filter(i=>i.type==='fund').map(i=>`<div class="tip" data-action="drill" data-cat="${i.cat.id}">🔧 <b>${esc(i.cat.name)}</b>: ${i.n} velika izdatka za ${i.span} mes. (ukupno ${fmt(i.total)}). To nije izuzetak nego redovan trošak — odvajaj <b>~${fmt(i.monthly)} mesečno</b> pa te sledeći neće iznenaditi.</div>`).join('')}
     ${ideas.filter(i=>i.type==='trips').map(i=>`<div class="tip">🛒 <b>${esc(displayName(i.merchant))}</b>: ~${i.perMonth.toFixed(0)} odlazaka mesečno, prosečno ${fmt(i.avg)}. Ređa, planirana kupovina obično smanji ukupan račun.</div>`).join('')}
     ${ideas.filter(i=>i.type==='cash').map(i=>`<div class="tip">💵 Oko <b>${fmt(i.monthly)}</b> mesečno podigneš u kešu bez evidencije. Uključi „Novčanik" (Više → Keš) ili plaćaj karticom — ne možeš da smanjiš ono što ne vidiš.</div>`).join('')}
   </section>`;
@@ -1399,6 +1405,7 @@ function statsModal(metric){
     const f = an.moneyFlow(range.preset==='all' ? null : { from:range.from, to:range.to }, rate, bigThreshold());
     body = `<div class="rec-row"><div>Prihodi</div><b class="pos">+${fmtN(f.income)}</b></div>
             <div class="rec-row"><div>Redovna potrošnja</div><b class="neg">−${fmtN(f.regular)}</b></div>
+            <div class="rec-row"><div>Povremeni veliki troškovi</div><b class="neg">−${fmtN(f.periodic)}</b></div>
             <div class="rec-row"><div>Jednokratni izdaci</div><b class="neg">−${fmtN(f.oneOffs)}</b></div>
             <div class="rec-row"><div>Keš sa bankomata</div><b class="neg">−${fmtN(f.cash)}</b></div>
             <div class="rec-row"><div>Prenosi ljudima (neto)</div><b class="neg">−${fmtN(f.people)}</b></div>

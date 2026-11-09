@@ -1,7 +1,7 @@
 // Offline service worker: cache-first for the app shell + libraries.
 // Bump CACHE whenever any file below changes — that is what makes installed apps
 // see the "Nova verzija" banner.
-const CACHE = 'moj-budzet-v29';
+const CACHE = 'moj-budzet-v30';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest',
   './css/style.css',

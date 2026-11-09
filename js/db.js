@@ -7,7 +7,7 @@ import { SEED_CATEGORIES, SEED_RULES } from './categorize.js';
 
 const IDB_NAME = 'my-budget';
 const STORE = 'vault';
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 const LEGACY_ITERATIONS = 310000; // vaults created before KDF params were stored
 
 let SQL = null;     // sql.js module
@@ -430,6 +430,16 @@ function migrate(){
     }
     db.run(`INSERT INTO meta(key,value) VALUES('schema_version','12') ON CONFLICT(key) DO UPDATE SET value='12'`);
     v = 12;
+  }
+  if(v < 13){
+    // learned "person → pass-through / currency exchange" memories get bound to the
+    // amounts seen (done once in the app after unlock); untracked-cash category
+    // goes under the "Ostalo" group like the other leftovers
+    setSetting('bind_learned','1');
+    const grp = get(`SELECT id FROM categories WHERE name='Ostalo' AND parent_id IS NULL`);
+    if(grp) db.run(`UPDATE categories SET parent_id=? WHERE name='Gotovina (keš)' AND parent_id IS NULL`, [grp.id]);
+    db.run(`INSERT INTO meta(key,value) VALUES('schema_version','13') ON CONFLICT(key) DO UPDATE SET value='13'`);
+    v = 13;
   }
 }
 

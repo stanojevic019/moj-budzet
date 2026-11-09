@@ -55,6 +55,34 @@ function catLookup(){
   return map;
 }
 
+const addMonth = (ym, d) => { let [y,m] = ym.split('-').map(Number); m += d; y += Math.floor((m-1)/12); m = ((m-1)%12+12)%12+1; return `${y}-${String(m).padStart(2,'0')}`; };
+const monthDiff = (a, b) => { const [ay,am]=a.split('-').map(Number), [by,bm]=b.split('-').map(Number); return (by-ay)*12 + (bm-am); };
+
+// "Periodic" big costs: a category whose big expenses keep coming back (car repairs,
+// insurance, school fees…) — big expenses in at least 3 different months of the last
+// 12. They are not one-offs: they are irregular-but-certain costs that need a monthly
+// reserve (a "sinking fund"). Returns { [categoryId]: { cat, n, total, monthly, span } }.
+const ALWAYS_ONE_OFF = ['Kupovina vozila'];
+export function periodicCats(rates, big=BIG_DEFAULT){
+  const b = db.get(`SELECT MIN(substr(date,1,7)) AS f, MAX(substr(date,1,7)) AS l FROM transactions`);
+  if(!b || !b.l) return {};
+  const start = addMonth(b.l, -11) > b.f ? addMonth(b.l, -11) : b.f;
+  const span = monthDiff(start, b.l) + 1;
+  if(span < 6) return {};                       // too little history to call anything "periodic"
+  const out = {};
+  for(const r of flowRows({ from:start, to:b.l }, rates)){
+    if(r.cls !== 'spend' || r.v < big || !r.cat || ALWAYS_ONE_OFF.includes(r.cat.name)) continue;
+    const o = out[r.category_id] || (out[r.category_id] = { id:r.category_id, cat:r.cat, n:0, total:0, ms:new Set() });
+    o.n++; o.total += r.v; o.ms.add(r.m);
+  }
+  for(const k of Object.keys(out)){
+    const o = out[k];
+    if(o.ms.size < 3) delete out[k];
+    else { o.monthly = o.total / span; o.span = span; delete o.ms; }
+  }
+  return out;
+}
+
 // ---------- the single classification ----------
 export function classify(cat, amount){
   const name = cat ? cat.name : '';
@@ -82,12 +110,12 @@ function flowRows(period, rates, extraCols=''){
 // ({from,to} in 'YYYY-MM', or null = all) limits which months are included.
 // Also splits spending into regular vs one-off (single tx >= big).
 export function monthly(rates, range, big=BIG_DEFAULT){
-  const byM = {};
+  const byM = {}, per = periodicCats(rates, big);
   for(const r of flowRows(range, rates)){
     const o = byM[r.m] || (byM[r.m] = { month:r.m, income:0, expense:0, spending:0, realIncome:0, net:0, big:0, cash:0, people:0, loan:0 });
     if(r.amount >= 0) o.income += r.v; else o.expense += r.v;
     if(r.cls === 'income') o.realIncome += r.v;
-    else if(r.cls === 'spend'){ o.spending += r.v; if(r.v >= big) o.big += r.v; }
+    else if(r.cls === 'spend'){ o.spending += r.v; if(r.v >= big && !per[r.category_id]) o.big += r.v; }
     else if(r.cls === 'refund') o.spending -= r.v;
     else if(r.cls === 'cash') o.cash += r.amount < 0 ? r.v : -r.v;
     else if(r.cls === 'people') o.people += r.amount < 0 ? r.v : -r.v;
@@ -125,11 +153,17 @@ export function categoryBreakdown(period, kind='expense', rates){
 // Where the money went in a period — every outflow, in buckets that add up:
 //   income − (regular + oneOffs + cash + people + loan) = change in balance (≈, FX aside)
 export function moneyFlow(period, rates, big=BIG_DEFAULT){
-  const f = { income:0, regular:0, oneOffs:0, cash:0, people:0, loan:0, bigList:[] };
+  const f = { income:0, regular:0, periodic:0, oneOffs:0, cash:0, people:0, loan:0, bigList:[], periodicList:[] };
+  const per = periodicCats(rates, big);
+  f.funds = Object.values(per).sort((a,b)=>b.monthly-a.monthly);
   const rows = flowRows(period, rates);
   for(const r of rows){
     if(r.cls === 'income') f.income += r.v;
-    else if(r.cls === 'spend'){ if(r.v >= big){ f.oneOffs += r.v; f.bigList.push(r); } else f.regular += r.v; }
+    else if(r.cls === 'spend'){
+      if(r.v < big) f.regular += r.v;
+      else if(per[r.category_id]){ f.periodic += r.v; f.periodicList.push(r); }
+      else { f.oneOffs += r.v; f.bigList.push(r); }
+    }
     else if(r.cls === 'refund') f.regular -= r.v;
     else if(r.cls === 'cash') f.cash += r.amount < 0 ? r.v : -r.v;
     else if(r.cls === 'people') f.people += r.amount < 0 ? r.v : -r.v;
@@ -140,8 +174,8 @@ export function moneyFlow(period, rates, big=BIG_DEFAULT){
     WHERE t.dedupe_key LIKE '%|w' ${period ? 'AND ' + monthCond(period,'t.date').cond : ''}`, period ? monthCond(period,'t.date').params : []).s;
   f.cash = Math.max(0, f.cash - Math.abs(toRSD(mirrored, 'RSD', rates)));
   f.people = Math.max(0, f.people);
-  f.bigList.sort((a,b)=>b.v-a.v);
-  f.out = f.regular + f.oneOffs + f.cash + f.people + f.loan;
+  f.bigList.sort((a,b)=>b.v-a.v); f.periodicList.sort((a,b)=>b.v-a.v);
+  f.out = f.regular + f.periodic + f.oneOffs + f.cash + f.people + f.loan;
   f.left = f.income - f.out;
   return f;
 }
@@ -171,6 +205,8 @@ export function savingIdeas(period, rates, months, big=BIG_DEFAULT){
     ${cond?'AND '+cond:''} GROUP BY t.merchant HAVING n >= ? ORDER BY n DESC LIMIT 3`, [...params, Math.ceil(2*mc)]);
   for(const t of trips){ const avg = t.total/t.n; if(avg < 1500) ideas.push({ type:'trips', merchant:t.merchant, perMonth:t.n/mc, avg, monthly:t.total/mc }); }
   const flow = moneyFlow(period, rates, big);
+  // irregular-but-certain costs: set aside a monthly reserve instead of being surprised
+  for(const p of flow.funds) ideas.push({ type:'fund', cat:p.cat, monthly:p.monthly, n:p.n, total:p.total, span:p.span });
   if(flow.cash/mc >= 5000) ideas.push({ type:'cash', monthly: flow.cash/mc });
   return ideas;
 }

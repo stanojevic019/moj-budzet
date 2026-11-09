@@ -2,21 +2,27 @@
 // (with auto-categorization + dedupe), statement import, and manual entry.
 
 import * as db from './db.js';
-import { cleanMerchant, categorize, sanitizeIcon, PROTECTED_CATEGORY_NAMES, merchantKey, trainModel, isCompany } from './categorize.js';
+import { cleanMerchant, categorize, sanitizeIcon, PROTECTED_CATEGORY_NAMES, merchantKey, trainModel, isCompany,
+  AMOUNT_BOUND, AMOUNT_TOL, amountKey, parseLearnedKey } from './categorize.js';
 
 // Build the learning context: merchant memory + a Naive Bayes model trained on the
 // user's already-categorized transactions. Cheap enough to build per import/recat.
 export function buildCtx(){
-  const learned = {};
-  for(const r of db.all(`SELECT key, category_id FROM learned`)) learned[r.key] = r.category_id;
+  const learned = {}, learnedAmt = {};
+  for(const r of db.all(`SELECT key, category_id FROM learned`)){
+    const p = parseLearnedKey(r.key);
+    if(p) (learnedAmt[p.key] || (learnedAmt[p.key] = [])).push({ amt: p.amt, cid: r.category_id });
+    else learned[r.key] = r.category_id;
+  }
   const m = catMap();
   const defE = m['Ostalo / Nekategorisano'], defI = m['Ostali prilivi'];
   const kind = {}; for(const c of getCategories(true)) kind[c.id] = c.kind;
+  const bound = new Set(AMOUNT_BOUND.map(n => m[n]).filter(id => id != null));
   const samples = db.all(
     `SELECT merchant, description, category_id FROM transactions
      WHERE category_id IS NOT NULL AND category_id NOT IN (?,?)`, [defE, defI])
     .map(r => ({ text: `${r.merchant||''} ${r.description||''}`, category_id: r.category_id, kind: kind[r.category_id] }));
-  return { learned, kind, model: trainModel(samples) };
+  return { learned, learnedAmt, bound, kind, model: trainModel(samples) };
 }
 
 export const isProtectedCategory = (id) => {
@@ -132,7 +138,7 @@ export function insertTransaction(tx, rules, ctx, opts){
   const isCredit = tx.amount >= 0;
   let catId = tx.category_id;
   if(catId == null){
-    catId = categorize({ merchant_clean: tx.merchant, description: tx.description, counterparty: tx.counterparty },
+    catId = categorize({ merchant_clean: tx.merchant, description: tx.description, counterparty: tx.counterparty, amount: tx.amount },
                        rules || getRules(), isCredit, ctx);
     if(catId == null) catId = isCredit ? m['Ostali prilivi'] : m['Ostalo / Nekategorisano'];
   }
@@ -252,12 +258,38 @@ function syncMirror(txId){
 }
 // teach: remember this merchant→category so future imports recognize it
 export function learnFromTx(txId, catId){
-  const t = db.get(`SELECT merchant, description FROM transactions WHERE id=?`, [txId]);
+  const t = db.get(`SELECT merchant, description, counterparty, amount FROM transactions WHERE id=?`, [txId]);
   if(!t) return;
   const k = merchantKey(t.merchant, t.description);
   if(!k) return;
-  db.run(`INSERT INTO learned(key,category_id,n) VALUES(?,?,1)
-          ON CONFLICT(key) DO UPDATE SET category_id=?, n=n+1`, [k, catId, catId]);
+  const upsert = (key) => db.run(`INSERT INTO learned(key,category_id,n) VALUES(?,?,1)
+          ON CONFLICT(key) DO UPDATE SET category_id=?, n=n+1`, [key, catId, catId]);
+  const c = db.get(`SELECT name FROM categories WHERE id=?`, [catId]);
+  const amt = Math.abs(t.amount || 0);
+  if(c && AMOUNT_BOUND.includes(c.name) && amt && !isCompany(t.counterparty || t.merchant)){ upsert(amountKey(k, amt)); return; }
+  // a different choice for this amount overrides an older amount-bound memory
+  for(const r of db.all(`SELECT key FROM learned WHERE substr(key,1,?)=?`, [k.length+1, k+'#'])){
+    const p = parseLearnedKey(r.key);
+    if(p && p.key === k && Math.abs(amt - p.amt) <= p.amt * AMOUNT_TOL) db.run(`DELETE FROM learned WHERE key=?`, [r.key]);
+  }
+  upsert(k);
+}
+// One-time (migration v13): older "person → pass-through / currency exchange" memories
+// were by name only. Re-learn them with the amounts actually seen, so that a different
+// amount from the same person is no longer silently dropped from the analysis.
+export function bindLearnedAmounts(){
+  const m = catMap(); let n = 0;
+  const ids = AMOUNT_BOUND.map(x => m[x]).filter(id => id != null);
+  if(!ids.length) return 0;
+  const keys = new Set(db.all(`SELECT key FROM learned WHERE category_id IN (${ids.join(',')})`).map(r => r.key));
+  for(const t of db.all(`SELECT merchant, description, counterparty, amount, category_id FROM transactions WHERE category_id IN (${ids.join(',')})`)){
+    const k = merchantKey(t.merchant, t.description);
+    if(!k || !keys.has(k) || !t.amount || isCompany(t.counterparty || t.merchant)) continue;
+    const key = amountKey(k, t.amount);
+    if(db.get(`SELECT 1 AS x FROM learned WHERE key=?`, [key])) continue;
+    db.run(`INSERT INTO learned(key,category_id,n) VALUES(?,?,1)`, [key, t.category_id]); n++;
+  }
+  return n;
 }
 export const learnedCount = () => db.get(`SELECT COUNT(*) AS c FROM learned`).c;
 // Debits still in "Ostalo / Nekategorisano" — the triage queue.
@@ -292,7 +324,11 @@ export function unmirroredCashCount(){
 export function cashWithdrawalsToExpense(){
   const podz = catMap()['Podizanje keša']; if(!podz) return 0;
   let cash = db.get(`SELECT id FROM categories WHERE name='Gotovina (keš)'`);
-  if(!cash){ db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES('Gotovina (keš)','expense','#64748b','💵',NULL,NULL)`); cash = { id: db.lastId() }; }
+  if(!cash){
+    const grp = db.get(`SELECT id FROM categories WHERE name='Ostalo' AND parent_id IS NULL`);
+    db.run(`INSERT INTO categories(name,kind,color,icon,grp,parent_id) VALUES('Gotovina (keš)','expense','#64748b','💵',NULL,?)`, [grp ? grp.id : null]);
+    cash = { id: db.lastId() };
+  }
   const rows = db.all(`SELECT id FROM transactions t WHERE t.category_id=? AND t.amount<0
     AND NOT EXISTS(SELECT 1 FROM transactions w WHERE w.dedupe_key = t.dedupe_key || '|w')`, [podz]);
   for(const r of rows) db.run(`UPDATE transactions SET category_id=? WHERE id=?`, [cash.id, r.id]);

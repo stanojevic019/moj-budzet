@@ -226,6 +226,17 @@ export function tokenize(text){
   return [...new Set((text||'').toUpperCase().replace(/[^A-ZČĆŽŠĐ0-9 ]/g,' ').split(/\s+/)
     .filter(t => t.length>=3 && !/^\d+$/.test(t) && !STOP.has(t)))].slice(0,40);
 }
+// Categories that take money OUT of the analysis (it "only passes through"). For a
+// person (not a company) the name alone is not enough to learn them — the same person
+// can be rent you forward, euros you buy, or a real transfer — so the learned memory
+// keeps the amount too ("KEY#56000") and applies only to similar amounts (±10%).
+export const AMOUNT_BOUND = ['Prolazni novac', 'Menjačnica (devize)'];
+export const AMOUNT_TOL = 0.10;
+export const amountKey = (key, amount) => `${key}#${Math.round(Math.abs(amount))}`;
+export function parseLearnedKey(key){
+  const i = key.lastIndexOf('#');
+  return i > 0 && /^\d+$/.test(key.slice(i+1)) ? { key: key.slice(0,i), amt: +key.slice(i+1) } : null;
+}
 // stable key for "this exact merchant" memory
 export function merchantKey(merchant, description){
   const toks = tokenize(merchant || description).filter(t=>!/^\d/.test(t)).slice(0,3);
@@ -299,8 +310,16 @@ export function categorize(tx, rules, isCredit, ctx){
   //    a refund (credit) from a shop must not inherit that shop's expense category.
   if(ctx && ctx.learned){
     const k = merchantKey(merch, tx.description);
+    const ok = (cid) => cid != null && (!ctx.kind || kindOk(ctx.kind[cid]));
+    // a person's "neutral" money (pass-through, currency bought from them) is
+    // remembered together with its amount — the same person can also be a loan or a gift
+    const amt = Math.abs(+tx.amount || 0);
+    if(k && amt && ctx.learnedAmt && ctx.learnedAmt[k]){
+      for(const e of ctx.learnedAmt[k]) if(Math.abs(amt - e.amt) <= e.amt * AMOUNT_TOL && ok(e.cid)) return e.cid;
+    }
     const cid = k ? ctx.learned[k] : null;
-    if(cid != null && (!ctx.kind || kindOk(ctx.kind[cid]))) return cid;
+    const bound = cid != null && ctx.bound && ctx.bound.has(cid) && !isCompany(tx.counterparty || merch);
+    if(ok(cid) && !bound) return cid;
   }
   // 2) explicit keyword rules
   const hay = `${merch} ${tx.description||''} ${tx.counterparty||''}`.toUpperCase();
